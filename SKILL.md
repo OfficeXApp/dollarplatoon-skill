@@ -311,6 +311,26 @@ All API paths below are relative to this base URL. For example, `POST /auth/send
 curl -H "x-api-key: $DOLLAR_PLATOON_API_KEY" https://dollarplatoon.com/api/auth/me
 ```
 
+### 4. Autologin Deep Links (Web)
+
+Append `?api_key=` to **any** dollarplatoon.com page URL to log in and land on that exact page in one step — ideal for agents or emails that deep-link users straight into a dashboard:
+
+```
+https://dollarplatoon.com/client/gig/GIG_01HX.../dashboard?api_key=YOUR_API_KEY
+https://dollarplatoon.com/gigworker/mailboxes?api_key=YOUR_API_KEY
+```
+
+Behavior:
+
+- The key is validated, the session is stored, and the `api_key` param is immediately scrubbed from the address bar and browser history. Other query params are preserved.
+- Already logged in with the same key? The page loads directly — no redirect or flicker.
+- Logged in as someone else? The URL's key wins and the session switches to that account.
+- Invalid key? Any existing session is kept; otherwise you land on the page logged out.
+
+There is also a dedicated `/auto-login?api_key=...&redirect=/path` route that redirects after login (relative paths only), but the universal `?api_key=` param above is simpler for deep links.
+
+> ⚠️ A URL containing `api_key` grants full account access to anyone who has it. Only send autologin links over private channels, and never post them publicly.
+
 ---
 
 ## AI Agents & Automation
@@ -508,6 +528,8 @@ Creates new user if first login. Auto-provisions hot wallet. Returns existing AP
   "review_timeout": 172800,                // seconds, default 48h
   "task_timeout": 86400,                   // optional, seconds a worker may hold a task before it expires; null = no expiry (default)
   "distribution": "round_robin",           // "round_robin" | "free_for_all" | "priority_weighted" | "random" | "queue" | "inbound_proof"
+  "default_rate_limit_count": 5,           // optional worker rate limit: max proofs/claims per window; both fields or neither
+  "default_rate_limit_minutes": 60,        // window length in minutes; null on both = no limit (default)
   "min_rep_volume": null,
   "min_rep_quality": null,
   "min_rep_recency": null,
@@ -587,6 +609,8 @@ Returns gig object. If authenticated as owner or member, includes `notes` and en
   "tags": ["reddit", "q3-launch"],           // arbitrary free-form strings; replaces the full list
   "join_policy": "invite",                   // "invite" | "open"
   "distribution": "random",
+  "default_rate_limit_count": 5,             // worker rate limit default: N proofs per M minutes; set both null to remove
+  "default_rate_limit_minutes": 60,
   "requires_approval": true,
   "min_payout": 1,
   "location": { "country": "US" },
@@ -598,6 +622,15 @@ Returns gig object. If authenticated as owner or member, includes `notes` and en
 // Response
 { "success": true }
 ```
+
+#### Worker Rate Limits (default_rate_limit_count / default_rate_limit_minutes)
+
+Optional per-worker throttle: each gigworker may take at most **N proofs per M minutes**. "Take" counts both proofs submitted and queue tasks claimed via `/queue/poll` that aren't proven yet — so a worker can't hoard the FIFO queue by claiming ahead. Default is no limit.
+
+- Set the gig-wide default with `default_rate_limit_count` + `default_rate_limit_minutes` (both positive integers, or both `null` to disable).
+- Override per worker via `PATCH /gigs/:id/mailboxes/:mbx_id` with `rate_limit_count` + `rate_limit_minutes` (owner only; both `null` reverts the mailbox to the gig default).
+- When a worker is at their limit, `/queue/poll` and `POST /gigs/:id/proofs` return `429` with a human-readable `error` (stating the limit and wait time) plus a `rate_limit` object: `{ count, minutes, source: "gig"|"mailbox", used, remaining, retry_at }`.
+- Submitting a proof for a queue task you already claimed is never blocked — the claim was already counted at poll time.
 
 #### Task Expiry (task_timeout)
 
@@ -712,7 +745,7 @@ Validates reputation thresholds. Auto-creates wallet alias for external wallets.
 
 ```json
 // Request (gig owner)
-{ "priority": 5, "status": "active" }
+{ "priority": 5, "status": "active", "rate_limit_count": 5, "rate_limit_minutes": 60 }
 
 // Request (mailbox worker)
 { "tags": ["urgent", "linkedin-batch"] }
@@ -721,7 +754,7 @@ Validates reputation thresholds. Auto-creates wallet alias for external wallets.
 { "success": true, "status": "active", "tags": ["urgent", "linkedin-batch"] }
 ```
 
-Owner can set `priority`, and `status` to `"active"` to approve a pending mailbox or `"inactive"` to disable it. The mailbox's worker can set `tags` — arbitrary free-form labels for organizing their inbox (replaces the full list; max 25 tags, 256 chars each). Tags are private to the worker: they are never returned to the gig owner via `GET /gigs/:id/mailboxes`.
+Owner can set `priority`, `status` (`"active"` to approve a pending mailbox, `"inactive"` to disable it), and a per-worker rate limit override: `rate_limit_count` + `rate_limit_minutes` (max N proofs/claims per M minutes; both positive integers, or both `null` to revert to the gig's `default_rate_limit_*`). The mailbox's worker can set `tags` — arbitrary free-form labels for organizing their inbox (replaces the full list; max 25 tags, 256 chars each). Tags are private to the worker: they are never returned to the gig owner via `GET /gigs/:id/mailboxes`.
 
 #### GET /mailboxes/mine
 
@@ -930,11 +963,15 @@ Requires valid `token` query parameter matching the gig's security token. Return
       "id": "...", "type": "webhook", "subject": "...",
       "payload": "...", "forwarded_at": "..."
     }
-  ]
+  ],
+  "count": 1,
+  "rate_limit": { "count": 5, "minutes": 60, "source": "gig", "used": 3, "remaining": 2, "retry_at": null }  // null if no limit configured
 }
 ```
 
 For `queue` gigs only. Returns unclaimed queued tasks in the configured queue order, skipping items you've already submitted a proof for or declined. Tasks are not forwarded to mailboxes — gigworkers must poll to claim them.
+
+If the gig (or your mailbox specifically) has a worker rate limit, polling past it returns `429` with an `error` message stating the limit and how long to wait, plus the same `rate_limit` object with `retry_at` set. Claims are capped to your remaining allowance — e.g. requesting 10 tasks with 2 remaining returns at most 2.
 
 #### POST /gigs/:id/queue/:msgId/decline
 
@@ -1122,6 +1159,36 @@ Creates user with email `officex-{user_id}@dollar-platoon.local`. Auto-provision
 ```
 
 Returns 404 if user not found (webhook may not have fired yet). Returns 403 if install_id mismatch.
+
+### Admin
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/admin/users/provision` | `x-admin-key` header | Programmatically provision (or fetch) an account |
+
+#### POST /admin/users/provision
+
+Idempotent. Creates the account (and auto-provisions a hot wallet) if the email is new — `201` with `"created": true`. If the account already exists, no changes are made and the existing account info is returned — `200` with `"created": false`. The API key is never rotated by this endpoint.
+
+```json
+// Request (header: x-admin-key: <ADMIN_API_KEY>)
+{ "email": "user@example.com" }
+
+// Response — 201 if newly created, 200 if the account already existed
+{
+  "created": false,
+  "account": {
+    "email": "user@example.com",
+    "api_key": "base64url_encoded_key",
+    "display_name": null,
+    "created_at": "2026-02-14T...",
+    "officex_user_id": null,
+    "officex_install_id": null
+  }
+}
+```
+
+Returns 503 if `ADMIN_API_KEY` is not configured, 401 if the header is missing, 403 if the key is invalid.
 
 ### Health
 
