@@ -3,7 +3,7 @@
 ## Quick Install
 
 ```bash
-npx skills add OfficeXApp/dollarplatoon-skill
+npx skills add https://github.com/OfficeXApp/dollarplatoon-skill
 ```
 
 > Or install on OfficeX: [officex.app/store/en/app/dollarplatoon-skill](https://officex.app/store/en/app/dollarplatoon-skill)
