@@ -331,6 +331,19 @@ There is also a dedicated `/auto-login?api_key=...&redirect=/path` route that re
 
 > ⚠️ A URL containing `api_key` grants full account access to anyone who has it. Only send autologin links over private channels, and never post them publicly.
 
+### 5. Universal URL Params (Web)
+
+These params work on dollarplatoon.com pages and compose with `?api_key=` autologin:
+
+- `hide_navbar=true` — universal, works on **any** page. Hides the top navbar entirely (it occupies no space) — ideal for iframe embeds. Persists for the browser tab across in-app navigation; `hide_navbar=false` turns it back on.
+- `view_only_gigs=id1,id2` — on `/gigworker/mailboxes`. Restricts the page to mailboxes belonging to the given comma-separated gig IDs (unread counts, All Mail, and timelines are scoped too). A banner shows the filter is active with a "Show all" link to clear it.
+
+Example — embed a gigworker's mailboxes for two specific gigs, chrome-free:
+
+```
+https://dollarplatoon.com/gigworker/mailboxes?api_key=YOUR_API_KEY&view_only_gigs=GIG_01AAA,GIG_01BBB&hide_navbar=true
+```
+
 ---
 
 ## AI Agents & Automation
