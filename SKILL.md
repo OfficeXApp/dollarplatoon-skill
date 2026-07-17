@@ -814,13 +814,18 @@ If the gig has `join_webhook_url` set (via `POST /gigs` or `PATCH /gigs/:id`), e
 { "priority": 5, "status": "active", "rate_limit_count": 5, "rate_limit_minutes": 60 }
 
 // Request (mailbox worker)
-{ "tags": ["urgent", "linkedin-batch"] }
+{ "tags": ["urgent", "linkedin-batch"], "wallet_address": "0x..." }
 
 // Response
-{ "success": true, "status": "active", "tags": ["urgent", "linkedin-batch"] }
+{ "success": true, "status": "active", "tags": ["urgent", "linkedin-batch"], "wallet_address": "0x..." }
 ```
 
 Owner can set `priority`, `status` (`"active"` to approve a pending mailbox, `"inactive"` to disable it), and a per-worker rate limit override: `rate_limit_count` + `rate_limit_minutes` (max N proofs/claims per M minutes; both positive integers, or both `null` to revert to the gig's `default_rate_limit_*`). The mailbox's worker can set `tags` — arbitrary free-form labels for organizing their inbox (replaces the full list; max 25 tags, 256 chars each). Tags are private to the worker: they are never returned to the gig owner via `GET /gigs/:id/mailboxes`.
+
+The mailbox's worker can also set `wallet_address` to change where future USDC payouts land (Base). Rules:
+- Must be a valid EVM address. It is auto-registered as a wallet alias on your account; an address already registered to a **different** account is rejected with `409` (wallets stay 1:1 with users, so reputation can't be hijacked). The same 409 applies when joining a gig with someone else's address.
+- Takes effect for **future rollups only** — already-created rollups (pending or debt retries) pay out to the address snapshotted when the rollup was created.
+- Reputation survives the change: rep events accrue per wallet, but gig `min_rep_*` join thresholds and profile reputation are computed by merging events across **all** wallets registered to your account, so rotating payout addresses never resets your history.
 
 #### GET /mailboxes/mine
 
