@@ -199,6 +199,7 @@ Dollar Platoon may not be used for illegal activities, adult content, harassment
 - **Use rejection tags.** When rejecting, always include a `rejection_tag`. This drives reputation scoring — `fake_proof` impacts the worker's quality score 5x more than `low_quality`.
 - **Report timeout-approved proofs.** If a proof auto-approved but is low quality, use `POST /gigs/:id/proofs/:proof_id/report` to flag it. Reported proofs are excluded from payouts.
 - **Configure proof webhooks.** Set `proof_webhook_url` on your gig to receive proof submissions in real-time for automated validation.
+- **Configure join webhooks.** Set `join_webhook_url` on your gig to receive a `mailbox.joined` POST whenever a new worker joins your network — useful for auto-provisioning workspaces or syncing your roster.
 
 ### Payouts
 
@@ -343,6 +344,40 @@ Example — embed a gigworker's mailboxes for two specific gigs, chrome-free:
 ```
 https://dollarplatoon.com/gigworker/mailboxes?api_key=YOUR_API_KEY&view_only_gigs=GIG_01AAA,GIG_01BBB&hide_navbar=true
 ```
+
+### 6. Timeline Pages (Web)
+
+Standalone activity-heatmap pages (GitHub-contribution-style grids of daily tasks/proofs). All compose with `?api_key=` autologin and `?hide_navbar=true`:
+
+- `/gig/:id/timeline-grid` — the gig's timeline (owner sees every mailbox's activity).
+- `/client/timelines` — multi-gig at-a-glance view for owners: one aggregate (all-mailboxes-combined) heatmap card per gig, each linking to that gig's `/gig/:id/timeline-grid`. **`?gigs=GIG_01AAA,GIG_01BBB` scopes it to an informal ad-hoc grouping** (comma-separated gig IDs — there is no stored gig-group concept, the URL is the grouping); gigs you can't access are silently skipped. No param = all gigs you own.
+- `/mailbox/:id/timeline-grid?gig=GIG_ID` — a single mailbox's timeline. The `gig` param is **required** in this mode.
+- `/gigworker/timelines` — the logged-in worker's timelines across all their active mailboxes. **`?gigs=GIG_01AAA,GIG_01BBB` scopes it to specific gigs** and **`?mailboxes=MBX_01AAA,MBX_01BBB` scopes it to specific mailboxes**; when both are given a mailbox is shown if it matches either list (union). IDs where the worker has no active mailbox are silently skipped. Note the param here is `gigs=`, not `view_only_gigs=` — that one only applies to `/gigworker/mailboxes`.
+
+Shared params:
+
+- `date=YYYY-MM-DD` — which day's stats panel to show (default today).
+- `spectrum=0,1,5,10,30` — color-scale thresholds (2–5 ascending non-negative integers); overrides the gig owner's saved default (`timeline_spectrum` on the gig). On `/gig/:id/timeline-grid` and `/mailbox/:id/timeline-grid` only.
+
+Example — a worker's timeline for one gig, chrome-free:
+
+```
+https://dollarplatoon.com/gigworker/timelines?api_key=YOUR_API_KEY&gigs=GIG_01AAA&hide_navbar=true
+```
+
+Example — a worker's timelines for two specific mailboxes:
+
+```
+https://dollarplatoon.com/gigworker/timelines?api_key=YOUR_API_KEY&mailboxes=MBX_01AAA,MBX_01BBB&hide_navbar=true
+```
+
+Example — a client's at-a-glance dashboard for a campaign spanning three gigs:
+
+```
+https://dollarplatoon.com/client/timelines?api_key=YOUR_API_KEY&gigs=GIG_01AAA,GIG_01BBB,GIG_01CCC&hide_navbar=true
+```
+
+The underlying API is `GET /gigs/:id/timeline?days=186&tz_offset=420&mailbox_id=...&per_mailbox=1` (auth required; owners get all mailboxes, workers their own).
 
 ---
 
@@ -550,6 +585,7 @@ Creates new user if first login. Auto-provisions hot wallet. Returns existing AP
   "location": { "country": "US", "label": "United States" },
   "icon_url": "https://...",
   "proof_webhook_url": "https://...",
+  "join_webhook_url": "https://...",       // optional, POSTed a mailbox.joined event when a worker joins
   "contract_address": "0x..."
 }
 
@@ -629,6 +665,7 @@ Returns gig object. If authenticated as owner or member, includes `notes` and en
   "location": { "country": "US" },
   "notes": "Updated internal notes",
   "proof_webhook_url": "https://...",
+  "join_webhook_url": "https://...",         // POSTed a mailbox.joined event when a worker joins; null to disable
   "contract_address": "0x..."
 }
 
@@ -753,6 +790,22 @@ Deposits USDC from your hot wallet to the gig's on-chain balance. Remember to bu
 ```
 
 Validates reputation thresholds. Auto-creates wallet alias for external wallets. Gigs with `join_policy: "invite"` reject joins without a valid invite token (403); email-bound invites must match your account email and skip owner approval. Legacy gigs without a join_policy remain open joins.
+
+If the gig has `join_webhook_url` set (via `POST /gigs` or `PATCH /gigs/:id`), each successful join fires a fire-and-forget POST to that URL:
+
+```json
+{
+  "event": "mailbox.joined",
+  "gig_id": "GIG_01HX...",
+  "mailbox_id": "01HX...",
+  "name": "John's Mailbox",
+  "status": "active",                  // or "pending_approval"
+  "email": "john@example.com",         // mailbox contact email (null if not provided)
+  "wallet_address": "0x...",
+  "invite_token": "a1b2c3d4e5f6",      // which invite was used (null for open joins)
+  "joined_at": "2026-07-16T00:00:00.000Z"
+}
+```
 
 #### PATCH /gigs/:id/mailboxes/:mbx_id
 
