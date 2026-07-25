@@ -187,7 +187,7 @@ Dollar Platoon may not be used for illegal activities, adult content, harassment
 
 ### Proof Submission
 
-- **Always include a `task_identifier`.** For `queue` gigs, use the polled task's `id` (the inbound message ULID) — this is how the server claims the queue item off to you and prevents other workers from double-handling it. For other distribution modes and `inbound_proof` gigs, use the task's unique reference (URL, ticket ID, etc.). **Do not use the subject line** — subjects are not unique, and collisions cause duplicate-submission 409s and missed payouts.
+- **Always include a `task_identifier`.** For `queue` gigs, use the polled task's `id` (the inbound message ULID) — this is how the server claims the queue item off to you and prevents other workers from double-handling it. For `queue_solo` gigs, use the `id` of the private copy you polled, not its `source_task_id`. For other distribution modes and `inbound_proof` gigs, use the task's unique reference (URL, ticket ID, etc.). **Do not use the subject line** — subjects are not unique, and collisions cause duplicate-submission 409s and missed payouts.
 - **Include verifiable evidence.** Proofs should contain URLs, screenshots, or other evidence that the client can independently verify. Unverifiable proofs are more likely to be rejected.
 - **Upload proof files via presigned URL first.** Use `POST /upload/presign` to get an S3 upload URL, upload your file, then include the returned `url` in your proof's `proofs` array.
 - **Check gig funding before submitting.** The gig detail endpoint shows `available_funds`. If funds are low, your proof may be approved but payment delayed until the client tops up.
@@ -337,7 +337,7 @@ There is also a dedicated `/auto-login?api_key=...&redirect=/path` route that re
 These params work on dollarplatoon.com pages and compose with `?api_key=` autologin:
 
 - `hide_navbar=true` — universal, works on **any** page. Hides the top navbar entirely (it occupies no space) — ideal for iframe embeds. Persists for the browser tab across in-app navigation; `hide_navbar=false` turns it back on.
-- `view_only_gigs=id1,id2` — on `/gigworker/mailboxes`. Restricts the page to mailboxes belonging to the given comma-separated gig IDs (unread counts, All Mail, and timelines are scoped too). A banner shows the filter is active with a "Show all" link to clear it.
+- `view_only_gigs=id1,id2` — on `/gigworker/mailboxes` and `/client/gigs`. On `/gigworker/mailboxes` it restricts the page to mailboxes belonging to the given comma-separated gig IDs (unread counts, All Mail, and timelines are scoped too); on `/client/gigs` it restricts the My Gigs list to those gig IDs. A banner shows the filter is active with a "Show all" link to clear it.
 
 Example — embed a gigworker's mailboxes for two specific gigs, chrome-free:
 
@@ -352,7 +352,7 @@ Standalone activity-heatmap pages (GitHub-contribution-style grids of daily task
 - `/gig/:id/timeline-grid` — the gig's timeline (owner sees every mailbox's activity).
 - `/client/timelines` — multi-gig at-a-glance view for owners: one aggregate (all-mailboxes-combined) heatmap card per gig, each linking to that gig's `/gig/:id/timeline-grid`. **`?gigs=GIG_01AAA,GIG_01BBB` scopes it to an informal ad-hoc grouping** (comma-separated gig IDs — there is no stored gig-group concept, the URL is the grouping); gigs you can't access are silently skipped. No param = all gigs you own.
 - `/mailbox/:id/timeline-grid?gig=GIG_ID` — a single mailbox's timeline. The `gig` param is **required** in this mode.
-- `/gigworker/timelines` — the logged-in worker's timelines across all their active mailboxes. **`?gigs=GIG_01AAA,GIG_01BBB` scopes it to specific gigs** and **`?mailboxes=MBX_01AAA,MBX_01BBB` scopes it to specific mailboxes**; when both are given a mailbox is shown if it matches either list (union). IDs where the worker has no active mailbox are silently skipped. Note the param here is `gigs=`, not `view_only_gigs=` — that one only applies to `/gigworker/mailboxes`.
+- `/gigworker/timelines` — the logged-in worker's timelines across all their active mailboxes. **`?gigs=GIG_01AAA,GIG_01BBB` scopes it to specific gigs** and **`?mailboxes=MBX_01AAA,MBX_01BBB` scopes it to specific mailboxes**; when both are given a mailbox is shown if it matches either list (union). IDs where the worker has no active mailbox are silently skipped. Note the param here is `gigs=`, not `view_only_gigs=` — that one only applies to `/gigworker/mailboxes` and `/client/gigs`.
 
 Shared params:
 
@@ -575,7 +575,9 @@ Creates new user if first login. Auto-provisions hot wallet. Returns existing AP
   "requires_approval": false,
   "review_timeout": 172800,                // seconds, default 48h
   "task_timeout": 86400,                   // optional, seconds a worker may hold a task before it expires; null = no expiry (default)
-  "distribution": "round_robin",           // "round_robin" | "free_for_all" | "priority_weighted" | "random" | "queue" | "inbound_proof"
+  "distribution": "round_robin",           // "round_robin" | "free_for_all" | "priority_weighted" | "random" | "queue" | "queue_solo" | "inbound_proof"
+  "queue_order": "fifo",                   // "queue"/"queue_solo" only: "fifo" (default) | "lifo"
+  "max_claims_per_task": 3,                // "queue_solo" only: how many workers may each take a task; null = unlimited (default)
   "default_rate_limit_count": 5,           // optional worker rate limit: max proofs/claims per window; both fields or neither
   "default_rate_limit_minutes": 60,        // window length in minutes; null on both = no limit (default)
   "min_rep_volume": null,
@@ -702,7 +704,7 @@ Resets the task's expiry clock, flipping it back to not-expired in the worker's 
 
 #### POST /gigs/:id/tasks/:msgId/recycle (Owner Only)
 
-Takes the task back from its current worker and redistributes it: queue gigs return it to the queue for the next worker (the previous holder won't receive it again); push gigs reassign it to another mailbox per the gig's distribution mode.
+Takes the task back from its current worker and redistributes it: `queue` gigs return it to the queue for the next worker (the previous holder won't receive it again); `queue_solo` gigs discard that worker's copy and return its claim slot, leaving every other worker untouched and making the task available to the original worker again; push gigs reassign it to another mailbox per the gig's distribution mode.
 
 ```json
 // Response (queue gig)
@@ -1012,7 +1014,24 @@ Requires valid `token` query parameter matching the gig's security token. Return
 - **queue** — Tasks stored in a shared queue; workers poll and claim tasks on-demand
 - **inbound_proof** — No tasks distributed; workers submit proofs directly without task assignment
 
-### Queue (FIFO)
+### Queue
+
+Two queue distributions share every endpoint below. They differ only in whether workers compete.
+
+| | `queue` (shared) | `queue_solo` (single player) |
+|---|---|---|
+| Who can claim a task | The first worker to poll it | Every worker, independently |
+| Effect on other workers | Claiming removes it from their queue | None — nothing you do is visible to them |
+| What you receive | The task itself | Your own private copy of the task |
+| Proofs per task | One, gig-wide | One per worker |
+| Cost per task | price × 1 | price × number of workers who take it |
+| Task leaves the queue when | Someone claims it | It hits `max_claims_per_task` (never, if unlimited) |
+
+Both honour `queue_order` (`fifo` = oldest task first, `lifo` = newest first).
+
+**`queue_solo` cost warning:** you pay **per task, per worker**. Ten queued tasks in a solo gig
+with five workers is fifty payouts, not ten. Set `max_claims_per_task` to bound this — it is also
+the only thing that ever drains a solo queue, since claiming does not consume the task.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
@@ -1032,7 +1051,8 @@ Requires valid `token` query parameter matching the gig's security token. Return
   "tasks": [
     {
       "id": "...", "type": "webhook", "subject": "...",
-      "payload": "...", "forwarded_at": "..."
+      "payload": "...", "forwarded_at": "...", "claimed_at": "...",
+      "source_task_id": "..."   // queue_solo only: the shared task this copy came from
     }
   ],
   "count": 1,
@@ -1040,7 +1060,11 @@ Requires valid `token` query parameter matching the gig's security token. Return
 }
 ```
 
-For `queue` gigs only. Returns unclaimed queued tasks in the configured queue order, skipping items you've already submitted a proof for or declined. Tasks are not forwarded to mailboxes — gigworkers must poll to claim them.
+For `queue` and `queue_solo` gigs. Returns tasks in the configured queue order, skipping anything you've already taken, proven, or declined. Tasks are not forwarded to mailboxes — gigworkers must poll to claim them.
+
+**Poll after every proof.** The intended loop is: poll → work → submit proof → poll again. Submitting a proof does not automatically fetch more work. A claim and its proof together cost one slot against your rate limit, not two, so the loop never double-charges you.
+
+In `queue_solo` gigs, each returned task is a private copy with its own `id`. Use that `id` as your `task_identifier` — never `source_task_id`, which is shared with other workers and will be rejected. Because no one competes with you, a poll can never fail with "already claimed"; it returns nothing only when you have already taken every task in the queue.
 
 If the gig (or your mailbox specifically) has a worker rate limit, polling past it returns `429` with an `error` message stating the limit and how long to wait, plus the same `rate_limit` object with `retry_at` set. Claims are capped to your remaining allowance — e.g. requesting 10 tasks with 2 remaining returns at most 2.
 
@@ -1050,12 +1074,16 @@ Marks a queue item as skipped *for the calling worker only*. Idempotent. Returns
 
 Use this when a polled task isn't suitable for you (spam, duplicate, ineligible, etc.) so future polls return fresh items instead of the same ones at the head of the FIFO queue. Other workers still see the item. The gig owner sees a `declined_count` on their dashboard so they can prune genuinely unworkable items.
 
+In `queue_solo` gigs, pass the `id` of your own copy. The copy is discarded, its claim slot is returned to the shared task so other workers are unaffected, and the task is retired for you permanently.
+
 **For Gigworkers (Queue gigs):**
 
-- Tasks are NOT forwarded to your mailbox. Instead, use "Poll New Tasks" in the UI or call `POST /gigs/:id/queue/poll` to claim tasks from the shared queue.
+- Tasks are NOT forwarded to your mailbox. Instead, use "Poll New Tasks" in the UI or call `POST /gigs/:id/queue/poll` to claim tasks.
 - Tasks are returned in the configured queue order (FIFO or LIFO) and filtered against proofs you've already submitted or items you've declined.
-- After polling, submit proofs via `POST /gigs/:id/proofs` using the polled task's `id` as `task_identifier` — this atomically claims the queue item into your mailbox.
+- After polling, submit proofs via `POST /gigs/:id/proofs` using the polled task's `id` as `task_identifier`.
+- Keep polling after each proof — that is the normal working loop, and it is not rate-limited beyond the gig's configured limit.
 - If a task isn't suitable, call `POST /gigs/:id/queue/:msgId/decline` to skip it. Declining is free and doesn't affect other workers.
+- In a **shared** `queue` gig you are racing other workers: a task can be claimed out from under you between polling and proving, which returns `409`. In a **`queue_solo`** gig that cannot happen — your copies are yours until you prove, skip, or the owner recycles them.
 
 ### Public (No Auth Required)
 
