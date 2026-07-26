@@ -166,11 +166,11 @@ Dollar Platoon may not be used for illegal activities, adult content, harassment
 
 ### Extending with Your Own Systems
 
-- **AI Agent Task Delivery (Recommended)** — Use the webhook endpoint to push tasks with dual-format HTML payloads. Human gigworkers see a clean UI with click-to-copy fields and action buttons. AI agents extract structured JSON from the hidden `div.agent-data`. One payload serves both audiences.
+- **AI Agent Task Delivery (Recommended)** — Use the webhook endpoint to push tasks with dual-format HTML payloads. Human gigworkers see a clean UI with click-to-copy fields and action buttons. AI agents extract structured JSON from the hidden `input[name="agent_data"]`. One payload serves both audiences.
 - **AI Agent Review** — Configure proof webhooks to send submissions to your own AI agent for automated quality checks
 - **Custom Validation Pipelines** — Build webhook handlers that validate proofs against external data sources
 - **Publisher App Integration** — Build or use third-party publisher apps to generate tasks via webhook
-- **AI Agent Gigworking** — Set a webhook URL on your mailbox when joining a gig. Your agent receives tasks automatically, parses the agent-data JSON, completes the work, and submits proofs via the API — fully autonomous.
+- **AI Agent Gigworking** — Set a webhook URL on your mailbox when joining a gig. Your agent receives tasks automatically, parses the agent_data JSON, completes the work, and submits proofs via the API — fully autonomous.
 - **Manual Workflow** — Email tasks to your gig address, review proofs in the dashboard, click approve/reject
 
 ---
@@ -854,13 +854,49 @@ Supports `?tag=` filtering by case-insensitive **substring** match against your 
 {
   "inbound_messages": [
     {
-      "id": "...", "type": "email", "subject": "...", "from": "sender@example.com",
-      "payload": "...", "mailbox_id": "...", "forwarded_at": "...",
+      "id": "...", "gig_id": "...", "type": "email", "subject": "...", "from": "sender@example.com",
+      "payload": "...", "payload_truncated": false, "payload_bytes": 4211,
+      "mailbox_id": "...", "forwarded_at": "...",
       "attachments": [{ "filename": "...", "content_type": "...", "url": "https://..." }]
     }
-  ]
+  ],
+  "next_cursor": null
 }
 ```
+
+**This is a list endpoint — `payload` may be a preview.** Large task bodies are stored outside
+the message row, so a list response carries only the first 1,000 characters of one.
+**`payload_truncated: true` means you must fetch the task itself before acting on it** —
+`payload_bytes` tells you the real length. Small tasks (under 6,000 characters) come back whole
+and always have `payload_truncated: false`.
+
+Paginated newest-first, 100 per page (`?limit=` up to 300). When `next_cursor` is non-null,
+pass it as `?cursor=` to get the next page. `?summary=1` returns every message with no
+payload field at all — use it for counts and unread badges.
+
+#### GET /gigs/:id/tasks/:msgId
+
+The full body of a single task. Use this whenever a list gave you `payload_truncated: true`.
+
+```json
+// Response
+{
+  "task": {
+    "id": "...", "type": "email", "subject": "...", "from": "...",
+    "payload": "<the complete body, never truncated>",
+    "payload_truncated": false, "payload_bytes": 31674,
+    "mailbox_id": "...", "forwarded_at": "...", "claimed_at": "...",
+    "expires_at": "...", "expired": false, "violation": null,
+    "attachments": [{ "filename": "...", "content_type": "...", "url": "https://..." }]
+  }
+}
+```
+
+Readable by the gig owner, by the worker the task is assigned to, and — for tasks still sitting
+in the queue — by any member of that gig.
+
+Tasks returned by `POST /gigs/:id/queue/poll` always carry their complete body already, so a
+polling worker never needs this endpoint.
 
 ### Proofs
 
@@ -976,7 +1012,7 @@ Groups approved + timeout_approved proofs by mailbox. Pre-checks `available_fund
 
 **This is the preferred endpoint for AI agents and publisher apps to deliver tasks.** Accepts **JSON** (default) or **HTML/plain text** payloads. Content-Type header determines parsing.
 
-**For AI agents:** Use `Content-Type: text/html` with the dual-format HTML pattern (see "Dual-Format HTML" section above) to deliver tasks that work for both human gigworkers and AI agents. Include a hidden `div.agent-data` with `data-agent-json` for structured data extraction.
+**For AI agents:** Use `Content-Type: text/html` with the dual-format HTML pattern (see "Dual-Format HTML" section above) to deliver tasks that work for both human gigworkers and AI agents. Include a hidden `<input type="hidden" name="agent_data" value=.{...}.>` carrying the task JSON — see the parsing convention in that section.
 
 **JSON payload (Content-Type: application/json):**
 
@@ -1003,7 +1039,13 @@ curl -X POST "https://dollarplatoon.com/api/inbound/webhook/GIG_01HX...?token=ab
 
 When HTML/text is sent, the message is stored with `type: "email"` and rendered as formatted HTML on the frontend (same as email-sourced tasks). An optional `subject` query parameter can be included to set the message subject line.
 
-Requires valid `token` query parameter matching the gig's security token. Returns 403 if token is invalid. Selects mailboxes via distribution algorithm, forwards payload to each mailbox webhook.
+Requires valid `token` query parameter matching the gig`s security token. Returns 403 if token is invalid. Selects mailboxes via distribution algorithm, forwards payload to each mailbox webhook.
+
+**Payload size:** bodies are stored in full — there is no silent truncation. Anything above
+2,000,000 characters is rejected with `413` and a body of
+`{ "error": "Payload too large", "received_chars": N, "max_chars": 2000000 }`, so an oversized
+task fails loudly instead of arriving with its tail missing. Bodies over 6,000 characters are
+kept off the message row, which is why list endpoints return a preview and `payload_truncated`.
 
 **Distribution Modes:**
 
@@ -1038,6 +1080,7 @@ the only thing that ever drains a solo queue, since claiming does not consume th
 | POST | `/gigs/:id/queue/poll` | Yes | Poll for available tasks (gigworker, queue gigs only) |
 | POST | `/gigs/:id/queue/:msgId/decline` | Yes | Skip a task so future polls don't return it to you (per-worker, does not hide from other workers) |
 | GET | `/gigs/:id/queue` | Yes | List queued tasks (owner sees `declined_count` per item) |
+| GET | `/gigs/:id/tasks/:msgId` | Yes | Get one task with its full body (owner, assignee, or gig member for queued tasks) |
 | DELETE | `/gigs/:id/tasks/:taskId` | Yes | Delete a stored task/inbound message (gig owner only) |
 
 #### POST /gigs/:id/queue/poll
