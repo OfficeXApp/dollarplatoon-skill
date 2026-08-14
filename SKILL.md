@@ -210,8 +210,36 @@ Dollar Platoon may not be used for illegal activities, adult content, harassment
 ### Share Tokens (Delegated Proof Submission)
 
 - **Gigworkers can share a link for proof submission without login.** Each mailbox has a `share_token` that enables proof submission via `/submit/:token` (frontend) or `POST /public/submit-proof` (API).
+- **The token is per mailbox, not per task.** One token covers every task in that mailbox and never expires. Treat the link as a password: anyone holding it can submit proof as that worker.
 - **Regenerate tokens if compromised.** Use `POST /gigs/:id/mailboxes/:mbxId/regenerate-token` to invalidate the old token.
-- **Rate limited.** Public endpoints are limited to 10-30 requests/minute per token.
+- **Rate limited.** Public endpoints are limited to 10-30 requests/minute per token, plus 60 requests/minute per caller IP. A caller that tries 10 unknown tokens in a minute is blocked for the rest of that minute.
+- **Get the token with the worker's API key.** `GET /mailboxes/mine` returns `share_token` on each mailbox, so an agent can build share links itself. The gig-owner list at `GET /gigs/:id/mailboxes` strips it.
+
+**Show the task on the share page (opt-in).** By default `/submit/:token` shows only the gig terms and a blank form — it reveals nothing about the mailbox contents. Append `?task=` with a task ID to render that one task above the proof form, with its identifier pre-filled and locked:
+
+```
+https://dollarplatoon.com/submit/SHARE_TOKEN?task=01KXQ...
+```
+
+- Get task IDs from `GET /mailboxes/:mbxId/inbound` (needs the worker API key).
+- The matching API route is `GET /public/task?token=...&task=...`. It returns one task: `id`, `type`, `subject`, `payload`, `forwarded_at` and presigned `attachments`. Sender address, claim state and queue position stay private.
+- The task must belong to the token's mailbox, or the route answers 404. There is deliberately **no** route that lists a mailbox's tasks by share token, so a leaked link alone cannot dump the task history — the holder also needs each task ID.
+- A bad or unknown task ID does not break the page. It shows a notice and the plain form still works.
+
+**Embedding the share page in an iframe.** `/submit/:token` is safe to embed in your own site. The page gives the reader **Copy message**, **Copy link**, **Open in new tab**, and a **Copy link** button on each attachment. Browsers block those APIs inside a frame unless the host page opts in, so set the iframe attributes yourself:
+
+```html
+<iframe
+  src="https://dollarplatoon.com/submit/SHARE_TOKEN?task=01KXQ..."
+  allow="clipboard-write"
+  sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
+></iframe>
+```
+
+- `allow="clipboard-write"` — without it the clipboard permission policy denies `navigator.clipboard`. The page then falls back to a legacy copy, and if that also fails it shows the text in a selected box for Ctrl+C. Copy never fails silently.
+- `allow-popups allow-popups-to-escape-sandbox` — needed only if you set `sandbox` at all. Without them the browser blocks every new tab, including links inside the task body, and the page shows the URL to copy instead.
+- `allow-scripts allow-same-origin allow-forms` — needed for the app to run, upload files and post the proof.
+- Do not add `sandbox` at all if you do not need it. A plain `<iframe src=...>` already permits new tabs.
 
 ---
 
@@ -576,7 +604,7 @@ Creates new user if first login. Auto-provisions hot wallet. Returns existing AP
   "review_timeout": 172800,                // seconds, default 48h
   "task_timeout": 86400,                   // optional, seconds a worker may hold a task before it expires; null = no expiry (default)
   "distribution": "round_robin",           // "round_robin" | "free_for_all" | "priority_weighted" | "random" | "queue" | "queue_solo" | "inbound_proof"
-  "queue_order": "fifo",                   // "queue"/"queue_solo" only: "fifo" (default) | "lifo"
+  "queue_order": "fifo",                   // "queue"/"queue_solo" only: "fifo" (default) | "lifo" | "priority" | "random"
   "max_claims_per_task": 3,                // "queue_solo" only: how many workers may each take a task; null = unlimited (default)
   "default_rate_limit_count": 5,           // optional worker rate limit: max proofs/claims per window; both fields or neither
   "default_rate_limit_minutes": 60,        // window length in minutes; null on both = no limit (default)
@@ -1069,7 +1097,26 @@ Two queue distributions share every endpoint below. They differ only in whether 
 | Cost per task | price × 1 | price × number of workers who take it |
 | Task leaves the queue when | Someone claims it | It hits `max_claims_per_task` (never, if unlimited) |
 
-Both honour `queue_order` (`fifo` = oldest task first, `lifo` = newest first).
+Both honour `queue_order`:
+
+- **`fifo`** (default) — oldest task first
+- **`lifo`** — newest task first
+- **`priority`** — you set the order. Each task carries a `priority` number; lower goes first,
+  and tasks sharing a number are served oldest-first. So 0, 1, 2, 5, 7, 23, 4689, 99999 are
+  polled in exactly that order, and setting a task to 0 jumps it ahead of a task at 1.
+- **`random`** — each poll draws at random from the tasks still in the queue. There is no
+  position, so `priority` numbers are ignored while this mode is on. Two polls a second apart
+  get different tasks, and a task at the back is as likely as one at the front. A poll samples
+  up to the first 1000 queued tasks; past that the draw is random over that window.
+
+New tasks default to priority **1000**, leaving room to insert both above and below without
+renumbering anything. Priorities are non-negative whole numbers up to 9999999999.
+
+Think of priority as a **virtual arrival time**: a task at priority 0 behaves as though it
+arrived before everything else. That is why `fifo` honours priorities too (oldest virtual
+arrival first) and `lifo` reverses them (highest number first). Setting `queue_order` to
+`priority` is how you declare the queue is meant to be hand-ordered — it turns on the priority
+column in the dashboard — but reordering works in any mode.
 
 **`queue_solo` cost warning:** you pay **per task, per worker**. Ten queued tasks in a solo gig
 with five workers is fifty payouts, not ten. Set `max_claims_per_task` to bound this — it is also
@@ -1079,9 +1126,62 @@ the only thing that ever drains a solo queue, since claiming does not consume th
 |--------|------|------|-------------|
 | POST | `/gigs/:id/queue/poll` | Yes | Poll for available tasks (gigworker, queue gigs only) |
 | POST | `/gigs/:id/queue/:msgId/decline` | Yes | Skip a task so future polls don't return it to you (per-worker, does not hide from other workers) |
-| GET | `/gigs/:id/queue` | Yes | List queued tasks (owner sees `declined_count` per item) |
+| GET | `/gigs/:id/queue` | Yes | List queued tasks (owner sees `declined_count` and `priority` per item) |
 | GET | `/gigs/:id/tasks/:msgId` | Yes | Get one task with its full body (owner, assignee, or gig member for queued tasks) |
+| PATCH | `/gigs/:id/tasks/:msgId/priority` | Yes | Move one queued task (gig owner only) |
+| PATCH | `/gigs/:id/queue/priorities` | Yes | Reorder up to 100 queued tasks in one call (gig owner only) |
 | DELETE | `/gigs/:id/tasks/:taskId` | Yes | Delete a stored task/inbound message (gig owner only) |
+
+#### Setting priority
+
+Three ways, all equivalent — they write the same number:
+
+**1. At submission**, via a query param on the publisher webhook. No follow-up call needed:
+
+```
+POST https://dollarplatoon.com/api/inbound/webhook/GIG_abc?token=...&priority=0
+```
+
+Priority rides on the query string because the request body is the task payload itself.
+Omitted means 1000. The response echoes `{"status": "queued", "message_id": "...", "priority": 0}`.
+
+**2. One task at a time:**
+
+```json
+PATCH /gigs/:id/tasks/:msgId/priority
+{ "priority": 0 }
+
+// Response
+{ "success": true, "id": "...", "priority": 0 }
+```
+
+**3. In bulk** — the endpoint to use when rearranging a queue programmatically:
+
+```json
+PATCH /gigs/:id/queue/priorities
+{ "updates": [ { "id": "task_a", "priority": 0 }, { "id": "task_b", "priority": 10 } ] }
+
+// Response
+{
+  "success": true,
+  "updated": 1,
+  "applied": [ { "id": "task_a", "priority": 0 } ],
+  "skipped": [ { "id": "task_b", "reason": "already_claimed" } ]
+}
+```
+
+Up to 100 tasks per call. The whole batch is validated before any of it is written, so a
+malformed entry rejects the request with `400` and changes nothing. Individual tasks that
+can't be moved are reported in `skipped` rather than failing the batch — `not_found`,
+`already_claimed` (a worker has it; its position no longer means anything), or `not_in_queue`
+(a `queue_solo` task that already hit `max_claims_per_task`).
+
+Reordering is cheap: position is stored in the task's index key, so each move is a single
+write and never touches the tasks you left alone. Rewriting the order of a 100-task queue on
+every tick is a reasonable thing to do.
+
+**Only queued tasks can be moved.** Once a worker claims a task it has left the queue, and a
+single-task PATCH returns `409`. Reordering the queue never disturbs work already in progress.
 
 #### POST /gigs/:id/queue/poll
 
@@ -1099,6 +1199,7 @@ the only thing that ever drains a solo queue, since claiming does not consume th
     }
   ],
   "count": 1,
+  "scan_exhausted": false,  // queue_solo only — see below
   "rate_limit": { "count": 5, "minutes": 60, "source": "gig", "used": 3, "remaining": 2, "retry_at": null }  // null if no limit configured
 }
 ```
@@ -1109,20 +1210,26 @@ For `queue` and `queue_solo` gigs. Returns tasks in the configured queue order, 
 
 In `queue_solo` gigs, each returned task is a private copy with its own `id`. Use that `id` as your `task_identifier` — never `source_task_id`, which is shared with other workers and will be rejected. Because no one competes with you, a poll can never fail with "already claimed"; it returns nothing only when you have already taken every task in the queue.
 
+**`scan_exhausted`** (`queue_solo` only) tells you which kind of empty response you got. A solo
+claim leaves the task in place, so the poll has to scan past everything you already hold, and
+it stops after a fixed budget. `false` with no tasks means there is genuinely nothing left for
+you — back off. `true` means the scan ran out of budget before filling your batch, and polling
+again will make further progress. Only large solo queues in priority order reach it.
+
 If the gig (or your mailbox specifically) has a worker rate limit, polling past it returns `429` with an `error` message stating the limit and how long to wait, plus the same `rate_limit` object with `retry_at` set. Claims are capped to your remaining allowance — e.g. requesting 10 tasks with 2 remaining returns at most 2.
 
 #### POST /gigs/:id/queue/:msgId/decline
 
 Marks a queue item as skipped *for the calling worker only*. Idempotent. Returns `{"success": true}`.
 
-Use this when a polled task isn't suitable for you (spam, duplicate, ineligible, etc.) so future polls return fresh items instead of the same ones at the head of the FIFO queue. Other workers still see the item. The gig owner sees a `declined_count` on their dashboard so they can prune genuinely unworkable items.
+Use this when a polled task isn't suitable for you (spam, duplicate, ineligible, etc.) so future polls return fresh items instead of the same ones at the head of the queue. Skipping returns the task to the position it held — it does not push it to the back — so other workers still see it exactly where the owner put it. The gig owner sees a `declined_count` on their dashboard so they can prune genuinely unworkable items.
 
 In `queue_solo` gigs, pass the `id` of your own copy. The copy is discarded, its claim slot is returned to the shared task so other workers are unaffected, and the task is retired for you permanently.
 
 **For Gigworkers (Queue gigs):**
 
 - Tasks are NOT forwarded to your mailbox. Instead, use "Poll New Tasks" in the UI or call `POST /gigs/:id/queue/poll` to claim tasks.
-- Tasks are returned in the configured queue order (FIFO or LIFO) and filtered against proofs you've already submitted or items you've declined.
+- Tasks are returned in the configured queue order (FIFO, LIFO, or the owner's hand-set priority) and filtered against proofs you've already submitted or items you've declined. Always work the tasks in the order polled — in a priority queue that order is the client's explicit instruction, not a suggestion.
 - After polling, submit proofs via `POST /gigs/:id/proofs` using the polled task's `id` as `task_identifier`.
 - Keep polling after each proof — that is the normal working loop, and it is not rate-limited beyond the gig's configured limit.
 - If a task isn't suitable, call `POST /gigs/:id/queue/:msgId/decline` to skip it. Declining is free and doesn't affect other workers.
