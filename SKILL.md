@@ -215,7 +215,7 @@ Dollar Platoon may not be used for illegal activities, adult content, harassment
 - **Include verifiable evidence.** Proofs should contain URLs, screenshots, or other evidence that the client can independently verify. Unverifiable proofs are more likely to be rejected.
 - **Upload proof files via presigned URL first.** Use `POST /upload/presign` to get an S3 upload URL, upload your file, then include the returned `url` in your proof's `proofs` array.
 - **Check gig funding before submitting.** The gig detail endpoint shows `available_funds`. If funds are low, your proof may be approved but payment delayed until the client tops up.
-- **Price is locked at submission.** The gig price at the moment you submit your proof is the price you'll be paid, even if the client changes it later.
+- **Price is locked at submission.** The price at the moment you submit your proof is the price you'll be paid, even if the client changes it later. Read the price from the **task** you polled, not from the gig — a client can price each task separately, and `price: null` (`price_tbd`) means the client sets the amount when they approve, with the gig price as the floor.
 
 ### Proof Review (Clients)
 
@@ -1103,7 +1103,17 @@ polling worker never needs this endpoint.
 
 The `warning` field appears when the gig's `available_funds` is less than the task price. The proof is still accepted, but payout will fail until the client deposits more funds.
 
-Price is locked at submission time (`locked_price`).
+Price is locked at submission time (`locked_price`). The number comes from the task's own
+price when it has one, and from the gig price otherwise — see **Per-task pricing** below.
+The submit response echoes it:
+
+```json
+{ "proof": { "id": "...", "status": "pending", "timeout_at": "...", "locked_price": 2.5, "price_pending": false } }
+```
+
+`locked_price` is `null` and `price_pending` is `true` when the task was priced `tbd`. The
+amount is then set at approval. Do not read that as `$0` — an unpriced TBD settles at the
+gig price if the client never names one.
 
 #### PATCH /gigs/:id/proofs/:proof_id (Review)
 
@@ -1111,12 +1121,19 @@ Price is locked at submission time (`locked_price`).
 // Request (approve)
 { "action": "approve", "feedback": "Great work!" }
 
+// Request (approve a TBD task, naming the amount)
+{ "action": "approve", "amount": 7.50 }
+
 // Request (reject)
 { "action": "reject", "feedback": "Screenshot doesn't match", "rejection_tag": "incomplete" }
 
 // Response
-{ "success": true, "status": "approved" }
+{ "success": true, "status": "approved", "locked_price": 7.5, "price_source": "review" }
 ```
+
+`amount` is only accepted on a proof whose `locked_price` is still `null` — that is, a TBD
+task. Sending it for an already-priced proof returns `409`. Approving a TBD **without**
+`amount` pays the gig price.
 
 Rejection tags (required when rejecting): `low_quality`, `incomplete`, `fake_proof`, `duplicate`, `unresponsive`, `other`
 
@@ -1269,7 +1286,212 @@ the only thing that ever drains a solo queue, since claiming does not consume th
 | GET | `/gigs/:id/tasks/:msgId` | Yes | Get one task with its full body (owner, assignee, or gig member for queued tasks) |
 | PATCH | `/gigs/:id/tasks/:msgId/priority` | Yes | Move one queued task (gig owner only) |
 | PATCH | `/gigs/:id/queue/priorities` | Yes | Reorder up to 100 queued tasks in one call (gig owner only) |
+| PATCH | `/gigs/:id/tasks/:msgId/price` | Yes | Set what one task pays (gig owner only) |
+| PATCH | `/gigs/:id/queue/prices` | Yes | Price up to 100 tasks in one call (gig owner only) |
+| PATCH | `/gigs/:id/tasks/:msgId/tags` | Yes | Retag one task (gig owner only) |
+| PATCH | `/gigs/:id/queue/tags` | Yes | Retag up to 100 tasks in one call (gig owner only) |
 | DELETE | `/gigs/:id/tasks/:taskId` | Yes | Delete a stored task/inbound message (gig owner only) |
+
+#### Per-task pricing
+
+A gig has a `price`, and by default every task in it is worth exactly that. A client who
+needs variable pay per task sets a price on the task itself.
+
+Three states. A task is in exactly one of them:
+
+| State | How | What the worker sees | What it pays |
+|---|---|---|---|
+| Gig price (default) | send nothing | the gig price | `gig.price` at proof time |
+| Fixed | `?price=2.50` or `PATCH .../price` | `$2.50` | `$2.50` |
+| TBD | `?price=tbd` | `TBD` | decided at approval; the gig price if never set |
+
+**1. At submission**, on the publisher webhook — same query-string convention as `priority`,
+because the request body is the task payload itself:
+
+```
+POST https://dollarplatoon.com/api/inbound/webhook/GIG_abc?token=...&price=2.50
+POST https://dollarplatoon.com/api/inbound/webhook/GIG_abc?token=...&price=tbd
+```
+
+Works on queue gigs and push gigs alike. Omit the param and the task is worth the gig price.
+
+**Email tasks always land at the gig price.** An inbound email has no place to carry a
+price, so mail arrives at the default. Reprice it afterwards with the PATCH below.
+
+**2. Later, one task at a time:**
+
+```json
+PATCH /gigs/:id/tasks/:msgId/price
+{ "price": 2.50 }     // fix the amount
+{ "price": "tbd" }    // decide later
+{ "price": null }     // clear the override - back to the gig price
+
+// Response
+{ "success": true, "id": "...", "price": 2.5, "price_tbd": false, "price_source": "task", "proof_updated": false }
+```
+
+`proof_updated` is `true` when a TBD proof was already waiting on this number and has now
+been given it — you do not have to name the same amount again at approval.
+
+Returns `409` if the task's proof has already locked a price. That lock is the point: a
+worker agreed to an amount when they submitted, and review cannot quietly lower it.
+
+**3. In bulk** — the endpoint to use when splitting a queue into pay bands:
+
+```json
+PATCH /gigs/:id/queue/prices
+{ "updates": [ { "id": "task_a", "price": 5.00 }, { "id": "task_b", "price": "tbd" } ] }
+
+// Response
+{
+  "success": true,
+  "updated": 1,
+  "applied": [ { "id": "task_a", "price": 5 } ],
+  "skipped": [ { "id": "task_b", "reason": "proof_price_locked" } ]
+}
+```
+
+Up to 100 tasks per call. The whole batch is validated before any of it is written, so a
+malformed entry rejects the request with `400` and changes nothing. Unlike the priority
+twin this accepts **claimed** tasks, because a TBD is normally priced after a worker has
+taken it. Individual failures come back in `skipped` — `not_found`, or `proof_price_locked`
+(its proof already locked a number).
+
+**4. At approval**, for a TBD task — see `PATCH /gigs/:id/proofs/:proof_id` above.
+
+#### How a price becomes a payout
+
+```
+task price (or the gig price)  ->  proof.locked_price at submission  ->  rollup gross_amount
+```
+
+The rule that keeps this safe: **anything unresolvable falls back to the gig price.** A proof
+with no matching task, a task naming another worker's mailbox, a task row written before
+per-task pricing existed, and a TBD nobody ever priced all pay `gig.price`. No task can pay
+`$0` by accident, and none can be stranded unpaid.
+
+A task's price only counts when the task belongs to the submitting mailbox. Naming another
+worker's expensive task id in `task_identifier` does not buy you their rate — it silently
+resolves to the gig price.
+
+#### Task tags — one gig, many shapes of work
+
+A gig is one vending machine. Tags let it carry related but different work — `shortform`,
+`longform`, `thumbnail` — so a worker takes only the shapes they want instead of you opening
+a separate gig for each.
+
+Tag a task on submission, next to `?price=`:
+
+```
+POST https://dollarplatoon.com/api/inbound/webhook/GIG_abc?token=...&tags=shortform,urgent
+```
+
+Or afterwards:
+
+```json
+PATCH /gigs/:id/tasks/:msgId/tags     { "tags": ["shortform"] }   // null clears
+PATCH /gigs/:id/queue/tags            { "updates": [ { "id": "task_a", "tags": ["shortform"] } ] }
+```
+
+Up to 100 tasks per bulk call, 25 tags per task, 256 chars each, matching is
+case-insensitive. Retagging a task does **not** re-run distribution — a push task already
+delivered stays where it is.
+
+##### The matching rule
+
+**A tag filter matches only tasks carrying a matching tag.** Filtering for `category_a`
+returns `category_a` work and nothing else. An untagged task does **not** match — it is not
+a wildcard.
+
+Tags and price are independent. Filtering on price alone does not require the task to have
+tags at all.
+
+##### `default_task_tags` — required for email gigs
+
+An inbound email has nowhere to carry `?tags=`. So on an email gig, a worker with any tag
+filter would receive **nothing, forever**.
+
+Set `default_task_tags` on the gig. It is stamped on any task that arrives without tags of
+its own — every email task, and any webhook call that omitted `?tags=`:
+
+```json
+PATCH /gigs/:id     { "default_task_tags": ["shortform"] }
+```
+
+The rule is unchanged: a task still must carry a matching tag. The gig just supplies one
+when the publisher cannot.
+
+##### Filtering when you poll
+
+Send a filter with `POST /gigs/:id/queue/poll`:
+
+```json
+{
+  "count": 5,
+  "tags": ["shortform", "thumbnail"],   // OR'd; also accepts "a,b" as a string
+  "tag_match": "substring",             // substring (default) | prefix | exact
+  "price_min": 2.00,
+  "price_max": 50.00,
+  "accept_tbd": true                    // default true — see below
+}
+```
+
+**An empty filtered poll does not mean "no work".** Matching happens after the rows are
+read, over the first 1000 queue rows, so a narrow filter on a deep queue can run out of scan
+budget. The response tells you which happened:
+
+```json
+{ "tasks": [], "count": 0, "scan_exhausted": true, "filter_applied": true }
+```
+
+- `scan_exhausted: false` — genuinely nothing matches. Back off, or widen the filter.
+- `scan_exhausted: true` — the scan ran out of budget. **Poll again**, or widen the filter.
+
+Both `queue` and `queue_solo` report this now.
+
+##### Filtering what is pushed to you
+
+On a push gig you do not poll — the client sends work to you. Store a standing preference on
+your mailbox instead:
+
+```json
+PATCH /gigs/:id/mailboxes/:mbx_id
+{
+  "filter_tags": ["shortform"],   // [] or null = accept every shape
+  "filter_tag_match": "substring",
+  "filter_price_min": 2.00,
+  "filter_price_max": null,
+  "filter_accept_tbd": true
+}
+```
+
+Worker-only — the gig owner can neither set these nor read them back. Same matching rule as
+polling. A mailbox with no filters set accepts everything, which is every mailbox that
+existed before this feature, so **nothing changes until you opt in**.
+
+If a task matches nobody, it is **dropped**, and the publisher is told:
+
+```json
+{ "status": "dropped", "reason": "no_matching_mailboxes",
+  "active_mailboxes": 7, "matched": 0, "evaluated": { "tags": ["thumbnail"], "price": 1 } }
+```
+
+This is deliberately distinct from `no_active_mailboxes` ("nobody is here"), and counts
+separately as `inbound_dropped_no_match` on the gig. The two need different fixes: recruit a
+worker, versus fix the tag vocabulary.
+
+##### TBD prices and filters
+
+A `price_tbd` task has no price yet, so a price range cannot honestly include or exclude it.
+It **bypasses** the price test unless you set `accept_tbd: false`. `gig.price` is not
+treated as a floor here — an owner can price a TBD below it at approval, so pretending to
+know the amount would make a promise the payout does not keep. Tag filters still apply.
+
+##### Owners: publish your tag vocabulary
+
+Workers set their filters **before** they have seen a single task, so put your tag list in
+the gig `terms`. That is the one field a worker reads before joining. A worker who guesses
+`short` when you send `shortform-vertical` silently receives less work, with no error.
 
 #### Setting priority
 
@@ -1334,22 +1556,35 @@ single-task PATCH returns `409`. Reordering the queue never disturbs work alread
     {
       "id": "...", "type": "webhook", "subject": "...",
       "payload": "...", "forwarded_at": "...", "claimed_at": "...",
+      "price": 2.50,            // what THIS task pays. null = TBD, priced at approval
+      "price_tbd": false,
+      "tags": ["shortform"],    // the shape of this task — what filters match on
       "source_task_id": "..."   // queue_solo only: the shared task this copy came from
     }
   ],
   "count": 1,
-  "scan_exhausted": false,  // queue_solo only — see below
+  "scan_exhausted": false,  // did the scan run out of budget? see Task tags above
+  "filter_applied": false,  // was a tag/price filter in effect?
   "rate_limit": { "count": 5, "minutes": 60, "source": "gig", "used": 3, "remaining": 2, "retry_at": null }  // null if no limit configured
 }
 ```
 
 For `queue` and `queue_solo` gigs. Returns tasks in the configured queue order, skipping anything you've already taken, proven, or declined. Tasks are not forwarded to mailboxes — gigworkers must poll to claim them.
 
+**Read `tags` and `price` per task, not per gig.** A task carries its own shape and its own
+rate. See **Task tags** below for filtering.
+
+**Read `price` per task, not per gig.** A gig's `price` is only the default. Each polled task
+carries its own `price`, which may be higher, lower, or `null` (`price_tbd: true`) when the
+client decides the amount at approval. A TBD task pays at least the gig price — that is the
+floor if the client never names a number. See **Per-task pricing**.
+
 **Poll after every proof.** The intended loop is: poll → work → submit proof → poll again. Submitting a proof does not automatically fetch more work. A claim and its proof together cost one slot against your rate limit, not two, so the loop never double-charges you.
 
 In `queue_solo` gigs, each returned task is a private copy with its own `id`. Use that `id` as your `task_identifier` — never `source_task_id`, which is shared with other workers and will be rejected. Because no one competes with you, a poll can never fail with "already claimed"; it returns nothing only when you have already taken every task in the queue.
 
-**`scan_exhausted`** (`queue_solo` only) tells you which kind of empty response you got. A solo
+**`scan_exhausted`** tells you which kind of empty response you got. Both `queue` and
+`queue_solo` report it. A solo
 claim leaves the task in place, so the poll has to scan past everything you already hold, and
 it stops after a fixed budget. `false` with no tasks means there is genuinely nothing left for
 you — back off. `true` means the scan ran out of budget before filling your batch, and polling
@@ -1600,6 +1835,11 @@ submitted (locked_price snapshot, timeout_at set)
   → reported (post-timeout flag by owner, excluded from payouts)
 ```
 
+A proof from a `tbd` task carries `locked_price: null` until it is approved. The amount is
+fixed at exactly one of three moments, whichever comes first: `PATCH .../tasks/:msgId/price`,
+`PATCH .../proofs/:proof_id` with an `amount`, or the review timeout — which settles at the
+gig price. After that the number never moves again.
+
 Rejection tags: `low_quality`, `incomplete`, `fake_proof`, `duplicate`, `unresponsive`, `other`
 
 ---
@@ -1607,7 +1847,8 @@ Rejection tags: `low_quality`, `incomplete`, `fake_proof`, `duplicate`, `unrespo
 ## Rollup & Payout Flow
 
 1. Client triggers `POST /gigs/:id/rollups` (or daily cron runs automatically)
-2. Groups approved proofs by mailbox, sums `locked_price` per mailbox
+2. Groups approved proofs by mailbox, sums `locked_price` per mailbox (an approved proof that
+   somehow reaches here still unpriced is summed at the gig price, never at `$0`)
 3. Skips mailboxes below `min_payout` threshold
 4. Pre-checks: `gross_amount + platform_fee <= available_funds` — **fails with 400 if underfunded**
 5. Calls on-chain `payout(gig_id, wallet, gross_amount, rollup_id)`
