@@ -450,7 +450,10 @@ every machine to discover it is empty does not scale past a handful of them.
 
 1. **Call `GET /work/available` first.** It lists your mailboxes with two markers per mailbox:
    `tasks_in_mailbox` (work already delivered to you) and `poll_in_gig` (unclaimed work in the
-   shared queue). Page with `?cursor=` until `next_cursor` is `null`.
+   shared queue). Narrow it with `?only_with_work=true`, and with `?tag=` plus `?tag_match=`
+   (`substring` / `prefix` / `exact`) if you organise your machines with tags. **Page with
+   `?cursor=` until `next_cursor` is `null` — a filtered page can be empty while more pages
+   remain, so stopping on an empty page skips paid work.**
 2. **Skip only what the endpoint calls empty.** `poll_in_gig: false` is definitive — do not poll
    it. `poll_in_gig: true` with `poll_exact: false` means "worth a look", not "guaranteed work".
 3. **Do not let the markers become a gate.** `tasks_in_mailbox` is approximate in both
@@ -927,7 +930,7 @@ The mailbox's worker can also set `wallet_address` to change where future USDC p
 }
 ```
 
-Supports `?tag=` filtering by case-insensitive **substring** match against your tags — `?tag=link` matches a mailbox tagged `"linkedin-batch"`. Comma-separated values are OR'd: `?tag=urgent,linkedin`.
+Supports `?tag=` filtering against your tags, always case-insensitive. Comma-separated values are OR'd: `?tag=urgent,linkedin`. `?tag_match=` picks the comparison — `substring` (default, so `?tag=link` matches `"linkedin-batch"`), `prefix` (alias `starts_with`), or `exact`. Same semantics as `GET /work/available`.
 
 Returns every mailbox by default. Send `?limit=` (max 200) or `?cursor=` to page instead; the
 response then carries a `next_cursor`, and `null` means you have reached the end.
@@ -974,7 +977,36 @@ Two markers, and they mean different things:
   that a mailbox is empty. Check the mailbox itself on a slower cadence regardless.
 - Only **active** mailboxes appear. A mailbox you left is omitted.
 
-Paginated: `?limit=` (default 50, max 100) and `?cursor=`. Page until `next_cursor` is `null`.
+**Filtering and pagination:**
+
+| Param | Effect |
+|---|---|
+| `?limit=` | Page size, default 50, max 100 |
+| `?cursor=` | Continue from a previous `next_cursor` |
+| `?tag=` | Keep only mailboxes carrying one of these tags. Comma-separated values are OR'd, always case-insensitive |
+| `?tag_match=` | How `?tag=` compares: `substring` (default), `prefix` (alias `starts_with`), or `exact`. An unrecognised value falls back to `substring` |
+| `?only_with_work=true` | Keep only mailboxes where `tasks_in_mailbox` or `poll_in_gig` is true |
+
+Examples — tags are your own free-form labels, set per mailbox:
+
+```
+GET /work/available?tag=linkedin&tag_match=prefix   # tag "linkedin-batch" matches
+GET /work/available?tag=batch                       # substring: "linkedin-batch" also matches
+GET /work/available?tag=urgent&tag_match=exact      # only the exact tag "urgent"
+GET /work/available?tag=urgent,linkedin             # OR across both
+GET /work/available?tag=video&only_with_work=true   # your video machines that have work now
+```
+
+**Page until `next_cursor` is `null`. Never stop on a short or empty page.** Filters are
+applied after each page is read, so a page can come back with 2 items — or none at all — while
+more pages remain. This matters most with `?only_with_work=true`: if most of your machines are
+idle, several pages in a row can be empty before one has work. An agent that stops early
+silently skips paid work.
+
+`?tag=` is applied before the gig lookups, so a narrow tag filter makes the request cheaper as
+well as shorter. `?only_with_work=` needs the markers first, so it only shortens the response.
+
+The same `?tag=` and `?tag_match=` work on `GET /mailboxes/mine`.
 
 Requires your API key. It accepts no gig id — the list is built from your own mailboxes, so you
 cannot ask about a gig you have not joined.
