@@ -7,8 +7,10 @@ description: >
   resolution. Use when: (1) Creating gigs or joining via invite, (2) Submitting or reviewing
   proofs, (3) Managing wallets and payouts, (4) Understanding pricing or network dynamics,
   (5) Integrating via webhook or public submit link.
-  Triggers: dollar platoon, gig payroll, micro-gig, proof review, rollup payout, volunteer mailbox,
-  invite link, task distribution, reputation system, treasury contract, recommended prices, how it works.
+  A gig is also called a "vending machine" — this is the colloquial term for a gig.
+  Triggers: dollar platoon, vending machine, gig payroll, micro-gig, proof review, rollup payout,
+  volunteer mailbox, invite link, task distribution, reputation system, treasury contract,
+  recommended prices, how it works.
 ---
 
 # Dollar Platoon
@@ -20,6 +22,26 @@ description: >
 Peer-to-peer task payroll on Base L2. Private, reputation-driven work networks for high-volume, low-ticket work — infrastructure, not a marketplace.
 
 Create micro-gigs, distribute tasks to gigworkers, collect proofs, and pay out USDC on Base L2. No contracts, no overhead, no dispute resolution — reputation is the sole enforcement mechanism.
+
+### Terminology: "Vending Machine" = Gig
+
+**A "vending machine" is a gig.** It is the colloquial name for the same object. When a user says "vending machine", read it as "gig". There is no separate vending machine entity, API resource, or endpoint — the API always calls it a gig (`/gigs`, `gig_id`).
+
+A gig works like a vending machine:
+
+- The client funds it with USDC, like loading money into the machine.
+- The gig holds gigworker mailboxes. Each mailbox receives tasks.
+- A gigworker puts in a proof of work, and the machine pays out USDC.
+- It runs without the client, on fixed rules: price per task, review timeout, and queue order.
+
+Related colloquial terms follow the same mapping:
+
+| Colloquial term | Actual object |
+|---|---|
+| Vending machine, machine | Gig |
+| Loading / stocking the machine | Funding the gig, or adding tasks to the queue |
+| Slot, dispenser | Gigworker mailbox in the gig |
+| Vending wall | A set of gigs shown together |
 
 ### For Clients
 
@@ -48,6 +70,8 @@ Peer-to-peer task payroll on Base L2. Read this before creating or joining a gig
 Dollar Platoon is composable on-chain task payroll infrastructure for private peer-to-peer work networks. There is no public marketplace: each gig is a private network, and clients invite gigworkers via invite links. Clients create gigs and fund them with USDC on Base L2. Gigworkers join via invite, receive tasks, submit proofs of completed work, and get paid automatically when proofs are approved.
 
 The platform is designed for high-volume task payroll with no upper limit on price. There is no dispute resolution. Reputation is the sole enforcement mechanism.
+
+Users often call a gig a **"vending machine"**: it holds gigworker mailboxes, accepts proofs of work, and pays out USDC automatically. The two words mean the same thing.
 
 **The basic flow:**
 
