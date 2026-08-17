@@ -222,7 +222,7 @@ Dollar Platoon may not be used for illegal activities, adult content, harassment
 ### Proof Review (Clients)
 
 - **Review promptly.** Proofs auto-approve after the `review_timeout` period (default 48 hours). If you miss the window, the proof is treated as approved.
-- **Use rejection tags.** When rejecting, always include a `rejection_tag`. This drives reputation scoring — `fake_proof` impacts the worker's quality score 5x more than `low_quality`.
+- **Use rejection tags.** When rejecting, always include a `rejection_tag`. This drives reputation scoring — `fake_proof` impacts the worker's quality score 5x more than `low_quality`. Use `not_selected` when you are closing out an applicant you did not hire: it is the one tag that does not affect their score.
 - **Report timeout-approved proofs.** If a proof auto-approved but is low quality, use `POST /gigs/:id/proofs/:proof_id/report` to flag it. Reported proofs are excluded from payouts.
 - **Configure proof webhooks.** Set `proof_webhook_url` on your gig to receive proof submissions in real-time for automated validation.
 - **Configure join webhooks.** Set `join_webhook_url` on your gig to receive a `mailbox.joined` POST whenever a new worker joins your network — useful for auto-provisioning workspaces or syncing your roster.
@@ -1138,9 +1138,11 @@ gig price if the client never names one.
 task. Sending it for an already-priced proof returns `409`. Approving a TBD **without**
 `amount` pays the gig price.
 
-Rejection tags (required when rejecting): `low_quality`, `incomplete`, `fake_proof`, `duplicate`, `unresponsive`, `other`
+Rejection tags (required when rejecting): `low_quality`, `incomplete`, `fake_proof`, `duplicate`, `unresponsive`, `other`, `not_selected`
 
-Rejection weights (reputation impact): fake_proof=5x, duplicate=3x, incomplete=2x, unresponsive=2x, low_quality=1x, other=1x
+Rejection weights (reputation impact): fake_proof=5x, duplicate=3x, incomplete=2x, unresponsive=2x, low_quality=1x, other=1x.
+`not_selected` is the exception — it is excluded from scoring entirely and costs the gigworker
+nothing. Use it when you simply hired someone else, never to soften a real quality problem.
 
 #### POST /gigs/:id/proofs/:proof_id/report (Owner Only)
 
@@ -1306,7 +1308,151 @@ the only thing that ever drains a solo queue, since claiming does not consume th
 | PATCH | `/gigs/:id/queue/prices` | Yes | Price up to 100 tasks in one call (gig owner only) |
 | PATCH | `/gigs/:id/tasks/:msgId/tags` | Yes | Retag one task (gig owner only) |
 | PATCH | `/gigs/:id/queue/tags` | Yes | Retag up to 100 tasks in one call (gig owner only) |
+| POST | `/gigs/:id/tasks/:msgId/assign` | Yes | Give one task to a named gigworker (gig owner only) |
+| PATCH | `/gigs/:id/tasks/:msgId/private-details` | Yes | Set the brief only the holder sees (gig owner only) |
 | DELETE | `/gigs/:id/tasks/:taskId` | Yes | Delete a stored task/inbound message (gig owner only) |
+
+#### Direct assignment
+
+By default a queue task goes to whoever polls first. That is correct for high-volume, low-price
+work and wrong for one expensive job, because "polled first" says nothing about competence.
+Assignment lets you give a task to a specific gigworker.
+
+Assign at task creation, next to `?price=`:
+
+```
+POST /api/inbound/webhook/GIG_abc?token=...&assign_to=01KR5BENF2CK39Y82B2MGQ1ND6
+POST /api/inbound/webhook/GIG_abc?token=...&assign_to=worker@example.com
+
+// Response — note this differs from the usual { "status": "forwarded", "targets": N }
+{ "status": "assigned", "message_id": "01KV...", "mailbox_id": "01KR5..." }
+```
+
+Or assign a task that already exists:
+
+```json
+POST /gigs/:id/tasks/:msgId/assign     { "assign_to": "worker@example.com" }
+```
+
+`assign_to` accepts a **mailbox id** or the gigworker's **account email** (their login address,
+not the contact email on the mailbox). Errors come back as `400` with a `reason`:
+`assignee_not_found`, `assignee_not_active`, or `assignee_ambiguous`.
+
+Works on queue and push gigs alike. On a queue gig the task never enters the queue, so no other
+worker sees it.
+
+**What assignment overrides.** An assigned task ignores the worker's own `filter_tags` and price
+filters, and skips `round_robin` rotation. You named this person, so their standing preferences
+do not apply. It also clears `declined_by`, so a worker who previously skipped the task can
+receive it.
+
+**Restrictions.**
+
+- `?priority=` is rejected with `?assign_to=` — an assigned task has no queue position.
+- `409` if the task already has a proof.
+- `400` on a `queue_solo` template or on a worker's copy of one. Those belong to the solo
+  claim-slot machinery; post new work with `?assign_to=` instead.
+- Assigning a task the worker already holds is supported and is how you **confirm** a
+  self-claimed task as assigned. It returns `unchanged: true` and preserves their claim.
+
+#### Private task details
+
+`private_details` is the part of the brief only the holder sees — the real spec, asset links,
+credentials. Advertise the job in the payload; keep the substance here.
+
+```json
+PATCH /gigs/:id/tasks/:msgId/private-details   { "private_details": "Full brief..." }
+PATCH /gigs/:id/tasks/:msgId/private-details   { "private_details": null }   // clears
+```
+
+Maximum **4000 characters**. The limit is deliberate: the value is stored inline and is never
+offloaded to object storage, which is what keeps it out of presigned-URL reach.
+
+Who sees it:
+
+| Caller | Sees `private_details` |
+|---|---|
+| Gig owner | Yes, everywhere |
+| The mailbox currently holding the task | Yes — in the poll response, `GET /mailboxes/:mbxId/inbound`, and `GET /gigs/:id/tasks/:msgId` |
+| Any other gig member browsing `GET /gigs/:id/queue` | No |
+| A share link (`/submit/:token`, `GET /public/task`) | No |
+| The task-delivery webhook | No — the brief does not exist yet when the task is created |
+
+**This stops browsing, not harvesting.** A worker can claim a task, read the brief, and decline;
+they keep what they read. `max_claims_per_task` and proof rate limits bound how often anyone can
+do that, as does `declined_by` — but a reassignment clears those markers. Do not treat
+`private_details` as confidentiality.
+
+#### Returning an assigned task
+
+A gigworker who cannot do an assigned task declines it as usual:
+
+```
+POST /gigs/:id/queue/:msgId/decline
+→ { "success": true, "skipped": true, "returned_to_owner": true }
+```
+
+The task goes back to the **owner**, not into the shared queue — `mailbox_id` becomes
+`"UNASSIGNED"`. It keeps its `private_details`, disappears from every queue and inbox, and only
+the owner can see it. Give it to someone else with `POST /gigs/:id/tasks/:msgId/assign`.
+
+`extend` and `recycle` both reject an `UNASSIGNED` task; there is no holder and no clock.
+
+**Push-gig limitation:** `POST /gigs/:id/queue/:msgId/decline` works on queue gigs only. An
+assignee on a push gig cannot hand a task back — only the owner's `recycle` can move it.
+
+#### Hiring for a high-value task
+
+A queue hands work to whoever polls first. On a $2 task that is fine. On a $500 task it means an
+unproven worker can take the job, hold it for a week, and submit poor work — while someone
+competent never saw it.
+
+There is no special "job posting" feature for this. Use the pieces that already exist:
+
+**1. Post free application tasks.**
+
+```
+POST /api/inbound/webhook/GIG_abc?token=...&price=0&tags=type:interested
+```
+
+Describe the job generically in the payload and ask for whatever you want to judge on — a
+portfolio link, a short plan, a sample. On a `queue_solo` gig set `max_claims_per_task: N` and
+post **one** task: it hands a private copy to each of N applicants. On a shared `queue` gig you
+must post N separate tasks, one per applicant slot.
+
+**2. Gigworkers apply by submitting a `$0` proof.** It costs them nothing and pays nothing.
+
+**3. Review the applications and REJECT them with `not_selected` — including the winner's.**
+
+```json
+PATCH /gigs/:id/proofs/:proof_id
+{ "action": "reject", "rejection_tag": "not_selected" }
+```
+
+This is the counter-intuitive part, and it matters for two reasons:
+
+- `not_selected` is excluded from scoring (see above), so nobody is penalized for applying and
+  losing. Any other tag **would** cost them reputation — use this one.
+- **Rejected `$0` proofs get cleared by a rollup. Approved `$0` proofs never do.** A payout run
+  skips any mailbox whose approved total is `$0`, so those rows are re-scanned forever and grow
+  without bound. Approving applications is the trap; rejecting them is the clean path.
+
+**4. Post the real job, assigned to the person you chose.**
+
+```
+POST /api/inbound/webhook/GIG_abc?token=...&price=500&assign_to=winner@example.com
+→ { "status": "assigned", "message_id": "01KV..." }
+
+PATCH /gigs/GIG_abc/tasks/01KV.../private-details   { "private_details": "The real brief..." }
+```
+
+Only they can see the brief, and nobody else can take the job.
+
+**Optional: gate the gig, not just the task.** A gig with `join_policy: "invite"` and
+`requires_approval: true` holds new members at `pending_approval` until you approve them.
+Applicants can put a portfolio link in the `notes` field when they join, which you can read in
+your mailbox list. This raises the floor for the whole gig, but note it does not solve
+allocation on its own — an approved-but-mediocre worker still polls as fast as anyone else.
 
 #### Per-task pricing
 
@@ -1692,6 +1838,28 @@ One review per reviewer-target pair per gig. Reviewer role auto-detected (client
 }
 ```
 
+#### `not_selected` — the rejection that costs nothing
+
+Rejecting a proof normally lowers the gigworker's `quality` score, and `quality` gates gig joins
+platform-wide via `min_rep_quality`. That is correct for bad work and wrong for "we hired
+someone else".
+
+`not_selected` is a rejection tag that is **excluded from scoring entirely** — not counted, not
+weighted, and not added to the denominator. Use it to close out applicants you did not pick:
+
+```json
+PATCH /gigs/:id/proofs/:proof_id
+{ "action": "reject", "rejection_tag": "not_selected", "feedback": "Went with another applicant" }
+```
+
+Every other rejection tag scores as before. This is what makes free application tasks safe (see
+"Hiring for a high-value task" below) — a gigworker can apply for ten jobs, lose nine, and carry
+no penalty for it.
+
+Do not reach for `not_selected` to soften a genuine quality problem. `low_quality`,
+`incomplete`, `fake_proof`, `duplicate`, and `unresponsive` all exist and all count, and
+reputation is the only enforcement this platform has.
+
 ### Wallets
 
 | Method | Path | Auth | Description |
@@ -1856,7 +2024,7 @@ fixed at exactly one of three moments, whichever comes first: `PATCH .../tasks/:
 `PATCH .../proofs/:proof_id` with an `amount`, or the review timeout — which settles at the
 gig price. After that the number never moves again.
 
-Rejection tags: `low_quality`, `incomplete`, `fake_proof`, `duplicate`, `unresponsive`, `other`
+Rejection tags: `low_quality`, `incomplete`, `fake_proof`, `duplicate`, `unresponsive`, `other`, `not_selected` (scores neutral)
 
 ---
 
