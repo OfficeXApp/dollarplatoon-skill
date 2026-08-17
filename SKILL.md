@@ -223,6 +223,8 @@ Dollar Platoon may not be used for illegal activities, adult content, harassment
 
 - **Review promptly.** Proofs auto-approve after the `review_timeout` period (default 48 hours). If you miss the window, the proof is treated as approved.
 - **Use rejection tags.** When rejecting, always include a `rejection_tag`. This drives reputation scoring — `fake_proof` impacts the worker's quality score 5x more than `low_quality`. Use `not_selected` when you are closing out an applicant you did not hire: it is the one tag that does not affect their score.
+- **Answer with the approval.** `feedback` is stored on an approval too, and the gigworker reads it. On an `inbound_proof` gig the proof is the application, so the approval is where you reply — "you are good, assigned to team abc, join the groupchat: <link>".
+- **Name what you cannot recognise.** `PATCH /gigs/:id/proofs/:proof_id/alias` gives a proof your own private title, so a long review queue reads as names instead of ids. See "Private Aliases".
 - **Report timeout-approved proofs.** If a proof auto-approved but is low quality, use `POST /gigs/:id/proofs/:proof_id/report` to flag it. Reported proofs are excluded from payouts.
 - **Configure proof webhooks.** Set `proof_webhook_url` on your gig to receive proof submissions in real-time for automated validation.
 - **Configure join webhooks.** Set `join_webhook_url` on your gig to receive a `mailbox.joined` POST whenever a new worker joins your network — useful for auto-provisioning workspaces or syncing your roster.
@@ -1077,6 +1079,7 @@ polling worker never needs this endpoint.
 | GET | `/gigs/:id/proofs/:proof_id` | Yes | Get proof detail |
 | PATCH | `/gigs/:id/proofs/:proof_id` | Yes | Approve or reject proof (owner only) |
 | POST | `/gigs/:id/proofs/:proof_id/report` | Yes | Report auto-approved proof (owner only) |
+| PATCH | `/gigs/:id/proofs/:proof_id/alias` | Yes | Set YOUR private title for a proof (owner or the worker who submitted it) |
 
 #### POST /gigs/:id/proofs (Submit Proof)
 
@@ -1137,6 +1140,21 @@ gig price if the client never names one.
 `amount` is only accepted on a proof whose `locked_price` is still `null` — that is, a TBD
 task. Sending it for an already-priced proof returns `409`. Approving a TBD **without**
 `amount` pays the gig price.
+
+`feedback` is stored on **either** verdict and the gigworker reads it on the proof. On a
+rejection it explains the problem. On an approval it is your reply to the submission, which is
+what makes an `inbound_proof` gig work as an application inbox: the proof IS the application,
+and the approval carries the answer.
+
+```json
+PATCH /gigs/:id/proofs/:proof_id
+{
+  "action": "approve",
+  "feedback": "You are good. Assigned to team abc — join the groupchat: https://..."
+}
+```
+
+Maximum 4000 characters. Omit it, or send `""` or `null`, to leave no note.
 
 Rejection tags (required when rejecting): `low_quality`, `incomplete`, `fake_proof`, `duplicate`, `unresponsive`, `other`, `not_selected`
 
@@ -1310,6 +1328,7 @@ the only thing that ever drains a solo queue, since claiming does not consume th
 | PATCH | `/gigs/:id/queue/tags` | Yes | Retag up to 100 tasks in one call (gig owner only) |
 | POST | `/gigs/:id/tasks/:msgId/assign` | Yes | Give one task to a named gigworker (gig owner only) |
 | PATCH | `/gigs/:id/tasks/:msgId/private-details` | Yes | Set the brief only the holder sees (gig owner only) |
+| PATCH | `/gigs/:id/tasks/:msgId/alias` | Yes | Set YOUR private title for a task (owner, the holder, or a gig member for queued tasks) |
 | DELETE | `/gigs/:id/tasks/:taskId` | Yes | Delete a stored task/inbound message (gig owner only) |
 
 #### Direct assignment
@@ -1771,6 +1790,32 @@ In `queue_solo` gigs, pass the `id` of your own copy. The copy is discarded, its
 - If a task isn't suitable, call `POST /gigs/:id/queue/:msgId/decline` to skip it. Declining is free and doesn't affect other workers.
 - In a **shared** `queue` gig you are racing other workers: a task can be claimed out from under you between polling and proving, which returns `409`. In a **`queue_solo`** gig that cannot happen — your copies are yours until you prove, skip, or the owner recycles them.
 
+### Private Aliases (Your Own Titles)
+
+A task or a proof can carry an **alias**: a short title you give it, from your point of view
+only. It is not shared. The client and the gigworker each keep their own alias for the same
+row, and neither can read the other's.
+
+```json
+PATCH /gigs/:id/tasks/:msgId/alias    { "alias": "Acme profile review" }
+PATCH /gigs/:id/proofs/:proof_id/alias { "alias": "Applicant — Jane, senior editor" }
+
+// Response
+{ "success": true, "id": "01J...", "alias": "Acme profile review" }
+```
+
+- Send `""` or `null` to clear it. Maximum 120 characters.
+- Every read of the row returns your own alias as `alias` (and `null` when you have not set
+  one). The stored map of other users' aliases never leaves the API.
+- The web app shows the alias in place of the row id in mailbox history, and the quick-search
+  box matches it case-insensitively along with the subject and the `task_identifier`.
+- Who may set one: the gig owner on any task or proof in their gig; the gigworker on a task
+  their mailbox holds (or one still queued in a gig they belong to) and on their own proofs.
+
+This pairs with approval notes on an `inbound_proof` gig: each inbound proof is a job for you
+to do, so alias it with what it actually is ("Applicant — Jane") and answer it with
+`feedback` when you approve.
+
 ### Public (No Auth Required)
 
 | Method | Path | Auth | Description |
@@ -2015,6 +2060,7 @@ Returns 503 if `ADMIN_API_KEY` is not configured, 401 if the header is missing, 
 submitted (locked_price snapshot, timeout_at set)
   → approved (client action) → rolled up → payout on-chain → paid
   → rejected (requires rejection_tag + optional feedback)
+  (feedback is optional on approval too, and the gigworker reads it either way)
   → timeout_approved (daily cron, after review_timeout) → same rollup path
   → reported (post-timeout flag by owner, excluded from payouts)
 ```
