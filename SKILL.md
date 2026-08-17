@@ -216,6 +216,8 @@ Dollar Platoon may not be used for illegal activities, adult content, harassment
 - **Upload proof files via presigned URL first.** Use `POST /upload/presign` to get an S3 upload URL, upload your file, then include the returned `url` in your proof's `proofs` array.
 - **Check gig funding before submitting.** The gig detail endpoint shows `available_funds`. If funds are low, your proof may be approved but payment delayed until the client tops up.
 - **Price is locked at submission.** The price at the moment you submit your proof is the price you'll be paid, even if the client changes it later. Read the price from the **task** you polled, not from the gig — a client can price each task separately, and `price: null` (`price_tbd`) means the client sets the amount when they approve, with the gig price as the floor.
+- **To check whether you were actually paid, read `paid_out_at` on the proof.** It is stamped only when USDC moved on chain for that proof. `status: "approved"` means the client accepted the work, not that the money has moved. See *How to tell whether a proof was really paid* under the rollup flow — a `paid` rollup with no `tx_hash`, or with `gross_amount: 0`, does not mean what it looks like.
+- **An approved proof is never dropped.** If a payout fails, the rollup holding your proof is retried every day until it settles, and the platform checks the chain first so you are never paid twice and never skipped. Nothing is required from you.
 
 ### Proof Review (Clients)
 
@@ -229,7 +231,8 @@ Dollar Platoon may not be used for illegal activities, adult content, harassment
 
 - **Trigger rollups manually or wait for the daily cron.** `POST /gigs/:id/rollups` processes all approved proofs immediately. The daily cron also processes approved proofs automatically.
 - **Minimum payout threshold.** If `min_payout` is set, mailboxes with earnings below the threshold are skipped (returned in `skipped_below_minimum`). Their proofs accumulate until the threshold is met.
-- **Check rollup status.** Rollups can fail if the on-chain transaction reverts (e.g., insufficient gas, contract error). Failed rollups are retried by the daily cron.
+- **Failed rollups retry themselves — never re-create one by hand.** A rollup can fail if the on-chain transaction reverts or the confirmation times out. The daily cron retries it, reusing the *same* rollup, until it settles. Do not try to work around a `failed` rollup by approving more work or triggering another payout for the same proofs: the retry is what fixes it, and a second rollup for the same proofs would be a second payment.
+- **A slow confirmation can look like a failure.** If a payout takes longer than 20 seconds to confirm, it is recorded `failed` and the owner is emailed — even though the transaction may land moments later. The next run detects that it was in fact paid and corrects the record to `paid`. Treat a single `failed` rollup as "not settled yet", not as "lost".
 
 ### Share Tokens (Delegated Proof Submission)
 
@@ -911,7 +914,7 @@ Owner can set `priority`, `status` (`"active"` to approve a pending mailbox, `"i
 
 The mailbox's worker can also set `wallet_address` to change where future USDC payouts land (Base). Rules:
 - Must be a valid EVM address. It is auto-registered as a wallet alias on your account; an address already registered to a **different** account is rejected with `409` (wallets stay 1:1 with users, so reputation can't be hijacked). The same 409 applies when joining a gig with someone else's address.
-- Takes effect for **future rollups only** — already-created rollups (pending or debt retries) pay out to the address snapshotted when the rollup was created.
+- Takes effect for **future rollups only** — a rollup that already exists, including one still being retried after a failure, pays out to the address snapshotted when it was created.
 - Reputation survives the change: rep events accrue per wallet, but gig `min_rep_*` join thresholds and profile reputation are computed by merging events across **all** wallets registered to your account, so rotating payout addresses never resets your history.
 
 #### GET /mailboxes/mine
@@ -1167,14 +1170,17 @@ Only works on `timeout_approved` proofs. Reported proofs are excluded from rollu
       "mailbox_id": "...",
       "wallet_address": "0x...",
       "proof_ids": ["...", "..."],
+      "paid_proof_ids": ["..."],
       "gross_amount": 5.00,
       "platform_fee": 0.50,
       "net_amount": 5.00,
       "tx_hash": "0x...",
-      "status": "paid"
+      "status": "paid",
+      "settled_by_reconciliation": false
     }
   ],
   "available_funds": 44.50,
+  "retried_stuck": 1,
   "skipped_below_minimum": [
     { "mailbox_id": "...", "amount": 0.50 }
   ]
@@ -1184,6 +1190,16 @@ Only works on `timeout_approved` proofs. Reported proofs are excluded from rollu
 Groups approved + timeout_approved proofs by mailbox. Pre-checks `available_funds >= gross_amount + platform_fee` (no debt allowed). Worker receives full `gross_amount`. Skips mailboxes below `min_payout` threshold.
 
 **Will return 400 error if the gig cannot cover the total cost (gross + 10% fee).**
+
+Before creating anything, this endpoint settles any rollup of yours left unsettled by an
+earlier run. `retried_stuck` counts those, and they appear in `rollups` alongside the new
+ones. A response with `retried_stuck` set and an otherwise empty `rollups` list means old
+payouts were repaired and there was no new work to pay.
+
+**Read `paid_proof_ids`, not `proof_ids`, to learn what a rollup paid for.** `proof_ids` also
+carries the mailbox's *rejected* proofs, which are swept in only so they stop being
+reconsidered on every future run. Nobody was paid for those. Rollups created before this
+distinction existed have no `paid_proof_ids`; on those, check each proof's own `status`.
 
 ### Inbound (Task Distribution)
 
@@ -1852,5 +1868,28 @@ Rejection tags: `low_quality`, `incomplete`, `fake_proof`, `duplicate`, `unrespo
 3. Skips mailboxes below `min_payout` threshold
 4. Pre-checks: `gross_amount + platform_fee <= available_funds` — **fails with 400 if underfunded**
 5. Calls on-chain `payout(gig_id, wallet, gross_amount, rollup_id)`
-6. On success: stores `tx_hash`, status → `paid`, creates reputation event
-7. On failure: status → `failed`, retried by next daily cron run
+6. On success: stores `tx_hash`, status → `paid`, stamps `paid_out_at` on every proof in
+   `paid_proof_ids`, creates reputation event
+7. On failure: status → `failed`. The next run asks the chain whether that payout actually
+   landed. If it did, the rollup is corrected to `paid` without sending anything. If it did
+   not, it is sent again. This repeats until it settles — a failed payout is never abandoned.
+
+### How to tell whether a proof was really paid
+
+Check **`proof.paid_out_at`**. It is set only when money actually moved on chain for that
+proof, and it is the field to build on if you are automating "have I been paid yet".
+
+Three things that look like payment and are not:
+
+- **`rollup.status === "paid"` is not sufficient.** A rollup with `gross_amount: 0` is written
+  straight to `paid` with no transaction. Those exist only to clear rejected proofs off the
+  queue. "Paid" there means "settled", not "the worker was paid".
+- **A missing `tx_hash` does not mean unpaid.** When a payout confirms after the process that
+  sent it has died, the hash is lost with it. The next run detects the payment on chain and
+  records the rollup as `paid` with `tx_hash: null` and `settled_by_reconciliation: true`. The
+  worker holds the USDC; only the receipt is missing. Do not resend against these.
+- **`proof.status === "approved"` only means the client accepted the work.** Payment follows
+  separately, on the next rollup, and can wait on `min_payout` or on the gig being funded.
+
+Proofs approved before `paid_out_at` existed were backfilled, so historical proofs carry it
+too. A proof with no `paid_out_at` and an `approved` status is simply awaiting its rollup.
