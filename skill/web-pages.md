@@ -137,9 +137,15 @@ These render **inside the app**, with the navbar and footer, like every other si
 feeds are members-only, so there is no reason to strip the chrome by default. To embed one, drop
 the chrome yourself with `?hide_navbar=true&hide_logo=true`.
 
-**Reading is members-only**, so unlike the submit and insert pages an embed must also carry
-`?api_key=` of an account that has accepted an invite — `hide_navbar` hides chrome, it does not
-authenticate. The join page is the exception: it signs somebody in itself, because an invite link
+**You do not need `?api_key=` if the browser is already signed in.** The session lives in the
+browser, so a member who is logged in just opens the URL.
+
+It is needed when the context has no session of its own, and the common case is a **cross-site
+iframe**: browsers partition storage per embedding site, so an embed on your domain cannot see a
+login made on dollarplatoon.com. Add `?api_key=` there. `hide_navbar` hides chrome; it does not
+authenticate.
+
+The join page is the exception either way — it signs somebody in itself, because an invite link
 gets opened cold.
 
 ```

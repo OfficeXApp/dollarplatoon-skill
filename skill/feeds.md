@@ -132,6 +132,9 @@ destructive. `display_name` is what the feed owner sees on the members page; it 
 **You may only list a gig you own.** Anything else is `403` — otherwise any member could advertise
 somebody else's gig on an invite link of their choosing.
 
+In the web app this is the **Add Gig** button on the feed's Registry tab, which lists only gigs
+you own, searchable by title or id. It is greyed out if you lack the `register` scope.
+
 ```bash
 curl -X POST https://dollarplatoon.com/api/feeds/FEED_01HX.../registry \
   -H "x-api-key: $API_KEY" -H "Content-Type: application/json" \
@@ -228,9 +231,12 @@ Neither can target the owner (`400`).
 Plus `/client/feed/<feed_id>` — the owner's settings and invite-link page.
 
 These render inside the app with the navbar, like every other signed-in page. To frame one,
-strip the chrome with `?hide_navbar=true&hide_logo=true`. They still need a member session:
-reading is members-only, so **an iframe must also carry `?api_key=`** of an account that has
-accepted an invite. See [web-pages.md](https://dollarplatoon.com/skill/web-pages.md).
+strip the chrome with `?hide_navbar=true&hide_logo=true`.
+
+They need a member session, but **not necessarily `?api_key=`** — a browser that is already
+signed in just opens the URL. Add the key when the context has no session of its own, which is
+the normal case for a cross-site iframe, since browsers partition storage per embedding site. See
+[web-pages.md](https://dollarplatoon.com/skill/web-pages.md).
 
 ## What removing a member does not do
 
