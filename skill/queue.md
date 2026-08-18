@@ -1,0 +1,314 @@
+# Queues — polling, ordering, and assigning work
+
+Two queue distributions share every endpoint here. They differ in one thing: whether workers
+compete for the same task.
+
+## Contents
+
+- `queue` versus `queue_solo`
+- Queue order
+- Routes
+- Polling for tasks
+- Declining a task
+- Setting priority
+- Direct assignment to one worker
+- Private task details
+- Returning an assigned task
+- Hiring for a high-value task
+
+---
+
+## `queue` versus `queue_solo`
+
+| | `queue` (shared) | `queue_solo` (single player) |
+|---|---|---|
+| Who can claim a task | The first worker to poll it | Every worker, independently |
+| Effect on other workers | Claiming removes it from their queue | None — nothing you do is visible to them |
+| What you receive | The task itself | Your own private copy |
+| Proofs per task | One, gig-wide | One per worker |
+| Cost per task | price × 1 | price × number of workers who take it |
+| Task leaves the queue when | Someone claims it | It hits `max_claims_per_task` (never, if unlimited) |
+
+**The `queue_solo` cost warning.** Ten queued tasks in a solo gig with five workers is fifty
+payouts, not ten. `max_claims_per_task` bounds it — and it is also the *only* thing that ever
+drains a solo queue, because claiming does not consume the task.
+
+## Queue order
+
+Set `queue_order` on the gig.
+
+- **`fifo`** (default) — oldest first.
+- **`lifo`** — newest first.
+- **`priority`** — you set the order. Each task carries a `priority` number; lower goes first, and
+  tasks sharing a number are served oldest-first. So 0, 1, 2, 5, 7, 23, 4689, 99999 are polled in
+  exactly that order.
+- **`random`** — each poll draws at random from the tasks still queued. There is no position, so
+  `priority` numbers are ignored while this mode is on. A poll samples up to the first 1000 queued
+  tasks.
+
+New tasks default to priority **1000**, leaving room to insert above and below without renumbering
+anything. Priorities are non-negative whole numbers up to 9999999999.
+
+Think of priority as a **virtual arrival time**: a task at 0 behaves as though it arrived before
+everything else. That is why `fifo` honours priorities (oldest virtual arrival first) and `lifo`
+reverses them. Setting `queue_order: "priority"` declares the queue is meant to be hand-ordered —
+it turns on the priority column in the dashboard — but reordering works in any mode.
+
+## Routes
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/gigs/:id/queue/poll` | Worker | Claim tasks |
+| POST | `/gigs/:id/queue/:msgId/decline` | Worker | Skip a task, for you only |
+| GET | `/gigs/:id/queue` | Member | List queued tasks with `tags`, `price`, `priority`, `declined_count` |
+| GET | `/gigs/:id/tasks/:msgId` | Owner, holder, or member | One task with its full body |
+| PATCH | `/gigs/:id/tasks/:msgId/priority` | Owner | Move one queued task |
+| PATCH | `/gigs/:id/queue/priorities` | Owner | Reorder up to 100 tasks in one call |
+| PATCH | `/gigs/:id/tasks/:msgId/price` | Owner | Set what one task pays |
+| PATCH | `/gigs/:id/queue/prices` | Owner | Price up to 100 tasks in one call |
+| PATCH | `/gigs/:id/tasks/:msgId/tags` | Owner | Retag one task |
+| PATCH | `/gigs/:id/queue/tags` | Owner | Retag up to 100 tasks in one call |
+| POST | `/gigs/:id/tasks/:msgId/assign` | Owner | Give a task to one named worker |
+| PATCH | `/gigs/:id/tasks/:msgId/private-details` | Owner | The brief only the holder sees |
+| PATCH | `/gigs/:id/tasks/:msgId/alias` | Owner, holder, member | Your own private title for a task |
+| DELETE | `/gigs/:id/tasks/:taskId` | Owner | Delete a task |
+
+`GET /gigs/:id/queue` accepts `?tag=`, `?tag_match=`, and `?tag_mode=`. It is the owner's way to
+confirm that `?tags=` and `?price=` landed — **do not use `/queue/poll` to check**, because it is
+worker-only and it claims what it returns.
+
+## Polling for tasks
+
+```json
+POST /gigs/:id/queue/poll   { "count": 2 }   // default 2, max 20
+```
+
+```json
+{
+  "tasks": [
+    { "id": "TASK_01HX...", "type": "webhook", "subject": "...", "payload": "...",
+      "forwarded_at": "...", "claimed_at": "...",
+      "price": 2.50, "price_tbd": false,
+      "tags": ["shortform"],
+      "source_task_id": null }
+  ],
+  "count": 1,
+  "scan_exhausted": false,
+  "filter_applied": false,
+  "rate_limit": { "count": 5, "minutes": 60, "source": "gig", "used": 3, "remaining": 2, "retry_at": null }
+}
+```
+
+Returns tasks in the configured order, skipping anything you have already taken, proven, or
+declined. Tasks are never pushed to a mailbox in a queue gig — you must poll.
+
+**Read `price` and `tags` per task, not per gig.** The gig price is only a default.
+
+**Poll after every proof.** Submitting does not fetch more work. A claim and its proof together
+cost one slot against your rate limit, not two.
+
+**In `queue_solo`**, each returned task is a private copy with its own `id`. Use that `id` as your
+`task_identifier` — never `source_task_id`, which is shared and will be rejected. Nobody competes
+with you, so a poll can never fail with "already claimed"; it returns nothing only when you have
+taken everything.
+
+**`scan_exhausted` tells you which kind of empty you got.** Matching happens after rows are read,
+over a bounded scan:
+
+- `false` with no tasks — genuinely nothing matches. Back off or widen the filter.
+- `true` — the scan ran out of budget. **Poll again**; it will make further progress.
+
+Both queue types report it. A solo claim leaves the task in place, so the poll has to scan past
+everything you already hold, which is what makes the budget reachable on large solo queues.
+
+Past your rate limit, polling returns `429` with `retry_at`. Claims are capped to your remaining
+allowance — asking for 10 with 2 left returns 2.
+
+Filtering a poll by tags and price: see
+[pricing-and-tags.md](https://dollarplatoon.com/skill/pricing-and-tags.md).
+
+## Declining a task
+
+```json
+POST /gigs/:id/queue/:msgId/decline   → { "success": true }
+```
+
+Marks the task skipped **for you only**. Idempotent, free, and invisible to other workers — the
+task keeps the position the owner gave it rather than being pushed to the back. Use it whenever a
+polled task is not suitable so future polls return fresh items instead of the same head of queue.
+
+In `queue_solo`, pass the `id` of your own copy: it is discarded, its claim slot returns to the
+shared task so other workers are unaffected, and the task is retired for you permanently.
+
+The owner sees a `declined_count` per task and can prune genuinely unworkable items.
+
+## Setting priority
+
+Three equivalent ways — they write the same number.
+
+**1. At submission**, on the publisher webhook (the body is the payload, so this rides the query
+string):
+
+```
+POST /inbound/webhook/GIG_abc?token=...&priority=0
+→ { "status": "queued", "message_id": "TASK_...", "priority": 0 }
+```
+
+**2. One task:**
+
+```json
+PATCH /gigs/:id/tasks/:msgId/priority   { "priority": 0 }
+→ { "success": true, "id": "TASK_...", "priority": 0 }
+```
+
+**3. In bulk** — up to 100 per call, for rearranging a queue programmatically:
+
+```json
+PATCH /gigs/:id/queue/priorities
+{ "updates": [ { "id": "TASK_a", "priority": 0 }, { "id": "TASK_b", "priority": 10 } ] }
+
+→ { "success": true, "updated": 1,
+    "applied": [ { "id": "TASK_a", "priority": 0 } ],
+    "skipped": [ { "id": "TASK_b", "reason": "already_claimed" } ] }
+```
+
+The whole batch is validated before anything is written, so a malformed entry returns `400` and
+changes nothing. Individual tasks that cannot move are reported in `skipped` rather than failing
+the batch: `not_found`, `already_claimed`, or `not_in_queue` (a solo task that hit
+`max_claims_per_task`).
+
+Reordering is cheap — position lives in the task's index key, so each move is a single write that
+never touches the tasks you left alone. Rewriting a 100-task order every tick is reasonable.
+
+**Only queued tasks move.** Once claimed, a task has left the queue and a single-task PATCH
+returns `409`. Reordering never disturbs work in progress.
+
+## Direct assignment to one worker
+
+A queue hands work to whoever polls first. That is right for a $2 task and wrong for one expensive
+job, because "polled first" says nothing about competence.
+
+At creation:
+
+```
+POST /inbound/webhook/GIG_abc?token=...&assign_to=MBX_01KR5BENF2CK39Y82B2MGQ1ND6
+POST /inbound/webhook/GIG_abc?token=...&assign_to=worker@example.com
+→ { "status": "assigned", "message_id": "TASK_01KV...", "mailbox_id": "MBX_01KR5..." }
+```
+
+Or on a task that already exists:
+
+```json
+POST /gigs/:id/tasks/:msgId/assign   { "assign_to": "worker@example.com" }
+```
+
+`assign_to` takes a **mailbox id** or the worker's **account email** (their login address, not the
+contact email on the mailbox). Failures return `400` with a `reason`: `assignee_not_found`,
+`assignee_not_active`, `assignee_ambiguous`.
+
+Works on queue and push gigs alike. On a queue gig the task never enters the queue, so no other
+worker ever sees it.
+
+**What assignment overrides.** An assigned task ignores that worker's own `filter_tags` and price
+filters and skips `round_robin` rotation — you named this person, so their standing preferences do
+not apply. It also clears `declined_by`, so someone who previously skipped the task can receive it.
+
+**Restrictions.**
+
+- `?priority=` is rejected alongside `?assign_to=` — an assigned task has no queue position.
+- `409` if the task already has a proof.
+- `400` on a `queue_solo` template or a worker's copy of one. Those belong to the solo claim-slot
+  machinery; post new work with `?assign_to=` instead.
+- Assigning a task the worker already holds is supported, and is how you **confirm** a
+  self-claimed task as assigned. It returns `unchanged: true` and preserves their claim.
+
+## Private task details
+
+`private_details` is the part of the brief only the holder sees — the real spec, asset links,
+credentials. Advertise the job in the payload; keep the substance here.
+
+```json
+PATCH /gigs/:id/tasks/:msgId/private-details   { "private_details": "Full brief..." }
+PATCH /gigs/:id/tasks/:msgId/private-details   { "private_details": null }   // clears
+```
+
+Maximum **4000 characters**. The limit is deliberate: the value is stored inline and never
+offloaded to object storage, which is what keeps it out of presigned-URL reach.
+
+| Caller | Sees it |
+|---|---|
+| Gig owner | Yes, everywhere |
+| The mailbox currently holding the task | Yes — in the poll response, their inbound list, and `GET /gigs/:id/tasks/:msgId` |
+| Any other gig member browsing `GET /gigs/:id/queue` | No |
+| A share link (`/submit/:token`, `GET /public/task`) | No |
+| The task-delivery webhook | No — the brief does not exist yet when the task is created |
+
+**This stops browsing, not harvesting.** A worker can claim a task, read the brief, and decline;
+they keep what they read. `max_claims_per_task`, proof rate limits, and `declined_by` bound how
+often anyone can do that — but a reassignment clears those markers. Do not treat `private_details`
+as confidentiality.
+
+## Returning an assigned task
+
+A worker who cannot do an assigned task declines it as usual:
+
+```json
+POST /gigs/:id/queue/:msgId/decline
+→ { "success": true, "skipped": true, "returned_to_owner": true }
+```
+
+The task goes back to the **owner**, not into the shared queue — `mailbox_id` becomes
+`"UNASSIGNED"`. It keeps its `private_details`, disappears from every queue and inbox, and only
+the owner can see it. Hand it to somebody else with `POST /gigs/:id/tasks/:msgId/assign`.
+
+`extend` and `recycle` both reject an `UNASSIGNED` task — there is no holder and no clock.
+
+**Push-gig limitation:** decline works on queue gigs only. An assignee on a push gig cannot hand a
+task back; only the owner's `recycle` can move it.
+
+## Hiring for a high-value task
+
+There is no special "job posting" feature. Compose the pieces that exist.
+
+**1. Post free application tasks.**
+
+```
+POST /inbound/webhook/GIG_abc?token=...&price=0&tags=type:interested
+```
+
+Describe the job generically and ask for whatever you will judge on — a portfolio link, a short
+plan, a sample. On a `queue_solo` gig set `max_claims_per_task: N` and post **one** task: it hands
+a private copy to each of N applicants. On a shared `queue` gig post N separate tasks.
+
+**2. Applicants apply by submitting a `$0` proof.** It costs them nothing and pays nothing.
+
+**3. Review, and REJECT them all with `not_selected` — including the winner's.**
+
+```json
+PATCH /gigs/:id/proofs/:proof_id   { "action": "reject", "rejection_tag": "not_selected" }
+```
+
+This is the counter-intuitive step, and it matters twice over:
+
+- `not_selected` is excluded from reputation scoring entirely, so nobody is penalised for applying
+  and losing. Any other tag **would** cost them.
+- **Rejected `$0` proofs get cleared by a rollup. Approved `$0` proofs never do.** A payout run
+  skips any mailbox whose approved total is `$0`, so those rows are rescanned forever and grow
+  without bound. Approving applications is the trap; rejecting them is the clean path.
+
+**4. Post the real job, assigned to the person you chose.**
+
+```
+POST /inbound/webhook/GIG_abc?token=...&price=500&assign_to=winner@example.com
+→ { "status": "assigned", "message_id": "TASK_01KV..." }
+
+PATCH /gigs/GIG_abc/tasks/TASK_01KV.../private-details   { "private_details": "The real brief..." }
+```
+
+Only they can see the brief, and nobody else can take the job.
+
+**Optional: gate the gig as well as the task.** `join_policy: "invite"` plus
+`requires_approval: true` holds new members at `pending_approval` until you approve them, and
+applicants can put a portfolio link in `notes` when they join. This raises the floor for the whole
+gig — but it does not solve allocation on its own, since an approved-but-mediocre worker still
+polls as fast as anyone else.
