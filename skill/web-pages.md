@@ -133,13 +133,17 @@ including the `?task=` opt-in and the skip/report actions, in
 | Members (owner only) | `/feed/<feed_id>/members` |
 | Accept an invite | `/feed/<feed_id>/join?invite=<token>` |
 
-These render standalone without the app chrome. **Reading is members-only**, so unlike the submit
-and insert pages an embed must carry `?api_key=` of an account that has accepted an invite —
-`hide_navbar` hides chrome, it does not authenticate. The join page is the exception: it signs
-somebody in itself, because an invite link gets opened cold.
+These render **inside the app**, with the navbar and footer, like every other signed-in page —
+feeds are members-only, so there is no reason to strip the chrome by default. To embed one, drop
+the chrome yourself with `?hide_navbar=true&hide_logo=true`.
+
+**Reading is members-only**, so unlike the submit and insert pages an embed must also carry
+`?api_key=` of an account that has accepted an invite — `hide_navbar` hides chrome, it does not
+authenticate. The join page is the exception: it signs somebody in itself, because an invite link
+gets opened cold.
 
 ```
-https://dollarplatoon.com/feed/FEED_01HX.../registry?api_key=YOUR_API_KEY&hide_logo=true
+https://dollarplatoon.com/feed/FEED_01HX.../registry?api_key=KEY&hide_navbar=true&hide_logo=true
 ```
 
 ## Timeline pages
@@ -210,7 +214,9 @@ and prompts are rendered in-page instead.
 |---|---|
 | `/client/gigs` | Client — your gigs. Create Gig sits at the top right. |
 | `/client/gig/:id/dashboard` | Client — one gig: tasks, proofs, mailboxes, payouts. |
-| `/client/feeds`, `/client/feed/:id` | Client — your feeds and one feed's settings and invites. |
+| `/client/feeds` | Client — your feeds. |
+| `/client/feed/:id` | Client — one feed's settings and its invite links. |
+| `/feed/:id/members` | Feed owner — who is in the feed, and their scopes. |
 | `/gigworker/mailboxes` | Worker — your mailboxes and their tasks. |
 | `/gigworker/feeds` | Worker — feeds you have joined. |
 | `/gigworker/earnings` | Worker — what you have been paid. |

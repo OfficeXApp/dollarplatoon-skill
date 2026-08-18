@@ -225,10 +225,12 @@ Neither can target the owner (`400`).
 | Members (owner) | `https://dollarplatoon.com/feed/<feed_id>/members` |
 | Accept an invite | `https://dollarplatoon.com/feed/<feed_id>/join?invite=<token>` |
 
-These render standalone, without the app chrome, so a partner can frame them. They still need a
-member session: reading is members-only, so **an iframe must carry `?api_key=`** of an account
-that has accepted an invite. `?hide_navbar=true` and `?hide_logo=true` work here too. See
-[web-pages.md](https://dollarplatoon.com/skill/web-pages.md).
+Plus `/client/feed/<feed_id>` — the owner's settings and invite-link page.
+
+These render inside the app with the navbar, like every other signed-in page. To frame one,
+strip the chrome with `?hide_navbar=true&hide_logo=true`. They still need a member session:
+reading is members-only, so **an iframe must also carry `?api_key=`** of an account that has
+accepted an invite. See [web-pages.md](https://dollarplatoon.com/skill/web-pages.md).
 
 ## What removing a member does not do
 
