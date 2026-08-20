@@ -37,9 +37,17 @@ member's scopes — the invite is a starting policy, not a permanent binding.
 | `read` | Read the registry and the notifications |
 | `register` | List **your own** gigs in this feed's registry |
 | `publish` | Post notifications to this feed |
+| `moderate` | Edit or remove **anybody's** registry entry and **anybody's** notification |
 
-Holding any scope implies `read`. The **owner** always has all three and is never a member row, so
+Holding any scope implies `read`. The **owner** always has all four and is never a member row, so
 no scope edit can lock them out of their own feed.
+
+`moderate` is authority over **content only**. It never reaches the member list, the invites, or
+the feed settings, so a moderator can neither widen their own access nor evict the owner. Treat a
+moderating invite like a key: bind it to one email, or limit it to one use.
+
+Content otherwise belongs to whoever put it there. A registry entry belongs to the gig's owner, a
+notification belongs to its author, and only they, the feed owner, or a moderator may change it.
 
 ## Routes
 
@@ -59,12 +67,12 @@ no scope edit can lock them out of their own feed.
 | DELETE | `/feeds/:feed_id/members/:user_id` | Owner | Remove a member |
 | PATCH | `/feeds/:feed_id/me` | Member | Change your own display name |
 | GET | `/feeds/:feed_id/registry` | `read` | Page the registry, newest added first |
-| POST | `/feeds/:feed_id/registry` | `register` | List one of **your own** gigs |
-| POST | `/feeds/:feed_id/registry/:gig_id/refresh` | Gig owner | Re-mint a dead invite link |
-| DELETE | `/feeds/:feed_id/registry/:gig_id` | Gig owner or feed owner | Remove a gig |
+| POST | `/feeds/:feed_id/registry` | `register` + own the gig, or `moderate` | List or edit a gig |
+| POST | `/feeds/:feed_id/registry/:gig_id/refresh` | Gig owner, feed owner or `moderate` | Re-mint a dead invite link |
+| DELETE | `/feeds/:feed_id/registry/:gig_id` | Gig owner, feed owner or `moderate` | Remove a gig |
 | GET | `/feeds/:feed_id/notifications` | `read` | Page notifications, newest first |
 | POST | `/feeds/:feed_id/notifications` | `publish` | Publish one |
-| DELETE | `/feeds/:feed_id/notifications/:notif_id` | Author or feed owner | Delete one |
+| DELETE | `/feeds/:feed_id/notifications/:notif_id` | Author, feed owner or `moderate` | Delete one |
 | GET | `/gigs/:id/feeds` | Gig owner | Which feeds list this gig |
 
 ## Create a feed
@@ -112,7 +120,7 @@ Look before you leap — this route needs no account:
 
 ```bash
 curl "https://dollarplatoon.com/api/feeds/FEED_01HX.../invite-info?invite=$TOKEN"
-→ { "feed": { "id": "...", "title": "...", "public_note": "...", "owner_email": "..." },
+→ { "feed": { "id": "...", "title": "...", "public_note": "...", "owner_display_name": "Acme Ops" },
     "invite": { "scopes": ["read","register"], "email_bound": false, "exhausted": false } }
 ```
 
@@ -125,7 +133,7 @@ curl -X POST https://dollarplatoon.com/api/feeds/FEED_01HX.../join \
 ```
 
 Re-joining is a **safe no-op that consumes no invite use**, so retrying after a timeout is never
-destructive. `display_name` is what the feed owner sees on the members page; it is optional.
+destructive. `display_name` is what the feed owner sees in the member list; it is optional.
 
 ## The registry
 
@@ -152,9 +160,24 @@ Reading the registry re-derives liveness for that page and **writes nothing**:
 ```json
 { "items": [ { "gig_id": "GIG_01HX...", "title": "...", "note": "...", "tags": ["cold_email"],
                "invite_url": "https://dollarplatoon.com/gig/GIG_01HX.../join?invite=...",
-               "invite_live": true, "added_at": "..." } ],
+               "invite_live": true, "added_at": "...", "can_edit": true, "can_delete": true,
+               "owner": { "user_id": "USER_...", "display_name": "Acme Ops" } } ],
   "next_cursor": null }
 ```
+
+`owner` is the **client who listed the gig** — the same person who owns it, because a row is
+credited to the gig's owner even when a moderator adds it. It is resolved when you read, so a
+client who renames themselves does not leave a stale name behind. It is `null` if that account
+cannot be read.
+
+It carries a **name and an account id, never an email address**. The same rule holds for
+`owner_display_name` on a feed and `author_display_name` on a notification. An account that set
+no display name is labelled by the local part of its email, so no address is ever published to
+other members. Only `GET /feeds/:feed_id/members`, which the feed owner alone may call, returns
+real email addresses.
+
+`can_edit` and `can_delete` say whether **you** may change this row: true for the gig's owner, the
+feed owner, and a moderator. They are hints for a UI. The write routes re-check them.
 
 **`invite_live` has three values and the third is the one that matters:**
 
@@ -183,8 +206,12 @@ curl -X POST https://dollarplatoon.com/api/feeds/FEED_01HX.../notifications \
 `destination_url` must be `https://` — anything else is rejected, because the value renders as a
 link for every member.
 
-Newest first. Each item carries `can_delete`, which is `true` for the author and the feed owner —
-use it rather than guessing who may delete. Caps: title 200 characters, subtext 2000, tags 25 of
+`author_display_name` is stamped by the server. You cannot set it. It is your name in this feed,
+or your account name if you set none — **never your email address**, because every member of the
+feed reads it.
+
+Newest first. Each item carries `can_delete`, which is `true` for the author, the feed owner and a
+moderator — use it rather than guessing who may delete. Caps: title 200 characters, subtext 2000, tags 25 of
 256 characters.
 
 An agent polling notifications should record the newest `id` it has seen and stop paging when it
@@ -225,10 +252,11 @@ Neither can target the owner (`400`).
 |------|-----|
 | Registry | `https://dollarplatoon.com/feed/<feed_id>/registry` |
 | Notifications | `https://dollarplatoon.com/feed/<feed_id>/notifications` |
-| Members (owner) | `https://dollarplatoon.com/feed/<feed_id>/members` |
 | Accept an invite | `https://dollarplatoon.com/feed/<feed_id>/join?invite=<token>` |
 
-Plus `/client/feed/<feed_id>` — the owner's settings and invite-link page.
+Plus `/client/feed/<feed_id>` — the owner's one settings page: feed details, invite links, and
+members, in that order. `/client/feed/<feed_id>#members` opens it at the member list.
+`/feed/<feed_id>/members` is the old member page and now redirects there.
 
 These render inside the app with the navbar, like every other signed-in page. To frame one,
 strip the chrome with `?hide_navbar=true&hide_logo=true`.

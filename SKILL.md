@@ -1,5 +1,5 @@
 ---
-name: dollar-platoon
+name: dollarplatoon-skill
 description: >
   Peer-to-peer task payroll on Base L2. Clients fund USDC gigs ("vending machines"), invite
   gigworkers by link, push tasks to their mailboxes, review proofs of work, and pay out
@@ -85,7 +85,10 @@ approval. The price is locked when you submit the proof.
 
 **4. `approved` is not `paid`. Read `proof.paid_out_at`.** It is stamped only when USDC actually
 moved on chain for that proof. A rollup can read `paid` with no money moved — see
-[skill/payouts.md](https://dollarplatoon.com/skill/payouts.md).
+[skill/payouts.md](https://dollarplatoon.com/skill/payouts.md). This is also the field that
+releases a proof's `private_note`: a gigworker can withhold the licence key, password or
+download link until the money lands, and the client sees only `private_note_locked: true` until
+then. Approving a proof does not open it.
 
 **5. Budget 110% of payouts.** The worker receives the full amount and the platform fee is
 charged **on top** from the gig balance. A $100 payout costs the gig $110. Funds are locked once
@@ -113,7 +116,7 @@ Each file below is self-contained and linked directly from here. Open what you n
 | [skill/tasks.md](https://dollarplatoon.com/skill/tasks.md) | Getting tasks INTO a gig: the publisher webhook, inbound email, distribution modes, and the payload formats that serve humans and agents at once. |
 | [skill/queue.md](https://dollarplatoon.com/skill/queue.md) | Queue and single-player queue: polling, claiming, declining, hand-ordering, assigning a task to one named worker, private briefs, hiring for a high-value job. |
 | [skill/pricing-and-tags.md](https://dollarplatoon.com/skill/pricing-and-tags.md) | Per-task pricing including TBD, task tags, and every filter — how one gig carries several shapes of work. |
-| [skill/proofs.md](https://dollarplatoon.com/skill/proofs.md) | Submitting proofs, reviewing them, rejection tags and what they cost, private aliases, and share links that let someone submit without an account. |
+| [skill/proofs.md](https://dollarplatoon.com/skill/proofs.md) | Submitting proofs, reviewing them, rejection tags and what they cost, private aliases, the `private_note` that is released only after payout, and share links that let someone submit without an account. |
 | [skill/payouts.md](https://dollarplatoon.com/skill/payouts.md) | Rollups, the fee, how to tell whether a proof was really paid, wallets, and reputation. |
 | [skill/feeds.md](https://dollarplatoon.com/skill/feeds.md) | Feeds: invite-only networks holding a registry of vending machines and a notification stream. |
 | [skill/web-pages.md](https://dollarplatoon.com/skill/web-pages.md) | Every shareable and embeddable page, autologin deep links, whitelabel params, and iframe rules. |

@@ -37,13 +37,15 @@ POST /gigs/:id/proofs
   "mailbox_id": "MBX_01HX...",
   "task_identifier": "TASK_01HX...",
   "proofs": ["https://reddit.com/r/...", "https://s3.../screenshot.png"],
-  "tags": ["batch_7"]
+  "tags": ["batch_7"],
+  "private_note": "Licence key: ABC-123-XYZ"
 }
 ```
 
 ```json
 → { "proof": { "id": "PROOF_01HX...", "status": "pending", "timeout_at": "...",
-               "locked_price": 2.5, "price_pending": false },
+               "locked_price": 2.5, "price_pending": false,
+               "private_note_locked": true },
     "warning": "Warning: gig available funds are less than the task price" }
 ```
 
@@ -150,6 +152,42 @@ POST /gigs/:id/proofs/:proof_id/report   → { "success": true, "status": "repor
 
 Works only on `timeout_approved` proofs — the ones that were approved because you missed the
 window. Reported proofs are excluded from rollups and will not be paid.
+
+## Private delivery (`private_note`)
+
+`proofs` is visible to the client the moment you submit. `private_note` is not. It is the
+escrowed half of the delivery — the licence key, the password, the download link — and the
+client cannot read it until they have actually paid for that proof.
+
+```json
+POST /gigs/:id/proofs   { ..., "private_note": "Licence key: ABC-123-XYZ" }
+POST /public/submit-proof { ..., "private_note": "Licence key: ABC-123-XYZ" }
+```
+
+Optional, at most 8000 characters, on both submit routes. A blank string means "none".
+
+Every proof response carries two fields for it:
+
+| Field | Meaning |
+|---|---|
+| `private_note_locked: true` | A note exists and is being withheld. `private_note` is `null`. |
+| `private_note: "..."` | Released. `private_note_locked` is `false`. |
+| both falsy | The worker attached no private note at all. |
+
+**The release condition is payment, not approval.** The note opens only when the proof is
+`approved` or `timeout_approved` **and** a rollup has stamped `paid_out_at` on it — meaning the
+money moved on chain. Approving a proof does not open it. A `rejected` or `reported` proof never
+opens, even though clearing those writes a $0 rollup straight to `paid`.
+
+The submitting gigworker always reads their own note back, at any status. The client polls
+`GET /gigs/:id/proofs/:proof_id` after their rollup settles.
+
+Put a big file in S3 and link it from the note. The link is presigned when the note is released
+and expires in an hour, so fetch the proof again for a fresh one. The S3 key itself is random,
+which is what keeps the file private while the note is still locked.
+
+A gigworker who submits through a share link (`POST /public/submit-proof`) has no account, so
+they cannot read the note back afterwards. It is write-once from that route.
 
 ## Private aliases
 
