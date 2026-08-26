@@ -6,6 +6,7 @@ A proof is the evidence a task was done. It is what triggers payment.
 
 - Routes
 - Submit a proof
+- Drafts — save before sending, or take a proof back
 - The proof lifecycle
 - Review a proof
 - Rejection tags and what they cost
@@ -20,9 +21,13 @@ A proof is the evidence a task was done. It is what triggers payment.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | `/gigs/:id/proofs` | Worker | Submit a proof |
+| POST | `/gigs/:id/proofs` | Worker | Submit a proof (`draft: true` saves without sending) |
 | GET | `/gigs/:id/proofs` | Yes | List proofs, filterable by status |
 | GET | `/gigs/:id/proofs/:proof_id` | Owner or submitter | One proof |
+| PATCH | `/gigs/:id/proofs/:proof_id/draft` | Submitter | Edit an unsent draft |
+| POST | `/gigs/:id/proofs/:proof_id/submit` | Submitter | Send a draft to the client |
+| POST | `/gigs/:id/proofs/:proof_id/withdraw` | Submitter | Take a pending proof back to draft |
+| DELETE | `/gigs/:id/proofs/:proof_id` | Submitter | Delete a draft |
 | PATCH | `/gigs/:id/proofs/:proof_id` | Owner | Approve or reject |
 | POST | `/gigs/:id/proofs/:proof_id/report` | Owner | Flag an auto-approved proof |
 | PATCH | `/gigs/:id/proofs/:proof_id/tags` | Owner or submitter | Retag |
@@ -38,7 +43,8 @@ POST /gigs/:id/proofs
   "task_identifier": "TASK_01HX...",
   "proofs": ["https://reddit.com/r/...", "https://s3.../screenshot.png"],
   "tags": ["batch_7"],
-  "private_note": "Licence key: ABC-123-XYZ"
+  "private_note": "Licence key: ABC-123-XYZ",
+  "asking_price": 50
 }
 ```
 
@@ -69,16 +75,127 @@ the gig price otherwise. `locked_price: null` with `price_pending: true` means t
 and the amount is set at approval — it is not `$0`, and it settles at the gig price if the client
 never names one. See [pricing-and-tags.md](https://dollarplatoon.com/skill/pricing-and-tags.md).
 
+## Name your own price
+
+A gig with `allow_price_offers: true` lets the worker quote their own number:
+
+```json
+POST /gigs/:id/proofs   { ..., "asking_price": 50 }
+
+→ { "proof": { "id": "PROOF_01HX...", "locked_price": 10, "asking_price": 50 } }
+```
+
+**An ask is a quote, never a payout.** `locked_price` still holds the task or gig price. The
+client accepts by approving with `amount` equal to `asking_price`; the proof then records
+`price_source: "worker"`. The client can also approve at the gig price, approve at a third
+number, or reject the proof.
+
+**Silence pays the gig price.** A review that times out settles at `locked_price`, so an ask can
+never be won by a client who stops answering. Bulk approval in the dashboard does the same.
+
+On a gig without the flag, `asking_price` returns `400`. Set it with
+`PATCH /gigs/:id  { "allow_price_offers": true }`.
+
 The `warning` field appears when the gig's `available_funds` is below the task price. The proof is
 still accepted and can still be approved, but it cannot be paid until the client deposits more.
+
+## Drafts — save before sending, or take a proof back
+
+`draft` is a proof the client has not been shown. Two things put a proof there, and they are the
+same state afterwards:
+
+- **Save before sending** — `POST /gigs/:id/proofs` with `"draft": true`
+- **Withdraw** — `POST /gigs/:id/proofs/:proof_id/withdraw` on a proof still `pending`
+
+```json
+POST /gigs/:id/proofs
+{ "mailbox_id": "MBX_01HX...", "task_identifier": "TASK_01HX...",
+  "proofs": ["work in progress"], "draft": true }
+
+→ { "proof": { "id": "PROOF_01HX...", "status": "draft", "timeout_at": null },
+    "warning": "This is a draft. The client cannot see it until you POST .../submit." }
+```
+
+**A draft claims its task, exactly like a submission.** That is the point — two workers cannot
+both draft the same task and then both try to send it. It also means the task counts against your
+`max_open_tasks` cap and your rate-limit window while the draft sits there.
+
+**Nothing happens to a draft on its own.** No review clock, no auto-approval, no `proof_webhook`,
+no payout, and it is not counted in `proofs_submitted`. The client cannot see it at all: it is
+filtered out of their dashboard, their proof list, and `GET /gigs/:id/proofs/:proof_id` returns
+`404` to them.
+
+### Editing and sending
+
+```json
+PATCH /gigs/:id/proofs/:proof_id/draft
+{ "proofs": ["https://..."], "private_note": "Licence key: ABC-123", "asking_price": 50 }
+
+→ { "success": true, "status": "draft", "updated": ["proofs", "private_note", "asking_price"] }
+```
+
+Send only the fields you are changing. `private_note` and `asking_price` accept `null` to clear.
+`task_identifier` cannot be changed — delete the draft and start again against the other task.
+
+```json
+POST /gigs/:id/proofs/:proof_id/submit
+
+→ { "success": true, "status": "pending", "timeout_at": "2026-08-22T...",
+    "locked_price": 2.5, "resubmitted": false }
+```
+
+**The price is snapshotted at submit, not when the draft was saved.** A draft can sit for days
+while the client reprices the task, so the number you agree to is the one showing when you send.
+The client may also reprice a task freely while it carries only a draft.
+
+### Withdrawing
+
+```json
+POST /gigs/:id/proofs/:proof_id/withdraw
+
+→ { "success": true, "status": "draft", "withdrawn_from": "pending" }
+```
+
+**The web app calls this button "Undo".** It is the same endpoint — the label avoids reading as a
+withdrawal of money.
+
+**Only a `pending` proof can be withdrawn.** Once the client has approved or rejected it, the
+verdict is theirs — withdrawing a rejection would erase it from your record. Anything already
+reviewed returns `409`.
+
+**Resending restarts the review clock from zero.** The client gets a full `review_timeout` window
+on work they are seeing for the first time. The webhook fires again with `"resubmitted": true`,
+but `proofs_submitted` and your reputation are credited only once, on the first send.
+
+### Deleting
+
+```json
+DELETE /gigs/:id/proofs/:proof_id      // drafts only; a submitted proof is a permanent record
+
+→ { "success": true, "id": "PROOF_01HX...", "deleted": true }
+```
+
+Deleting frees the `task_identifier` so a fresh proof can be started against it. Your claim on
+the task is left alone — abandon it and `task_timeout` recycles it as normal.
+
+**A draft is discarded for you when the task leaves you.** Declining it, reporting it, an owner
+recycling or reassigning it, and the expiry sweep all delete your draft, because otherwise it
+would block the next worker's proof against that task.
 
 ## The proof lifecycle
 
 ```
+draft  (no clock, invisible to the client — POST with draft:true, or withdraw a pending proof)
+  ├─ deleted           (worker action, or the task leaves them)
+  └─ submit ─┐
+             ↓
 submitted  (locked_price snapshot, timeout_at set)
+  ├─ draft             (worker withdraws; pending only, and only before a payout)
   ├─ approved          (client action)            → rolled up → paid on-chain → paid_out_at set
   ├─ timeout_approved  (cron, after review_timeout) → same rollup path
-  ├─ rejected          (needs a rejection_tag)
+  ├─ rejected          (needs a rejection_tag; returns the task to be done again by default)
+  │    approved ⇄ rejected: the client may change the verdict until a rollup carries the proof,
+  │                         and never once the rejection returned the task
   └─ reported          (owner flags a timeout-approved proof; excluded from payouts)
 ```
 
@@ -94,6 +211,7 @@ PATCH /gigs/:id/proofs/:proof_id
 
 { "action": "approve", "feedback": "Great work!" }
 { "action": "approve", "amount": 7.50 }                                  // a TBD task
+{ "action": "approve", "amount": 50 }                                    // accept a worker's ask
 { "action": "reject", "rejection_tag": "incomplete", "feedback": "Screenshot doesn't match" }
 
 → { "success": true, "status": "approved", "locked_price": 7.5, "price_source": "review" }
@@ -114,12 +232,116 @@ carries the answer.
 
 Maximum 4000 characters. Omit it, or send `""` or `null`, to leave no note.
 
-`amount` is accepted only on a proof whose `locked_price` is still `null`. Sending it for an
-already-priced proof returns `409` — the price a worker agreed to at submission cannot be lowered
-at review.
+`amount` is accepted on a proof whose `locked_price` is still `null`, and on a proof that carries
+an `asking_price`. Sending it for any other already-priced proof returns `409` — the price a
+worker agreed to at submission cannot be lowered at review. A worker's own ask reopens the
+number because they, not the client, named it.
 
 **Automate it** by setting `proof_webhook_url` on the gig: every submission is POSTed there, so
 your own validator or AI agent can check the work before you look at it.
+
+## A rejection returns the task by default
+
+Rejecting a proof sends its task back out to be done again, unless you say otherwise. The work
+you asked for is still work you want; before this, a rejected task was closed for good and
+nobody — not another worker, not you — could ever pick it up.
+
+```json
+PATCH /gigs/:id/proofs/:proof_id
+
+{ "action": "reject", "rejection_tag": "incomplete" }                   // task goes back out
+{ "action": "reject", "rejection_tag": "not_selected", "requeue": false }  // task closes too
+
+→ { "success": true, "status": "rejected", "requeued": true, "task_identifier": "TASK_..." }
+```
+
+**`requeue` defaults to `true`.** Existing automation that rejects proofs now returns tasks
+without asking. Send `"requeue": false` wherever a rejection is meant to end the task — hiring
+gigs that reject every applicant but one are the usual case.
+
+Where the task actually lands depends on the gig's distribution:
+
+| Distribution | Where the task goes |
+|---|---|
+| `queue` | back into the queue at its own position, this worker excluded |
+| `queue_solo` | this worker's copy is dropped, the claim slot returns to the template |
+| assigned task | back to you as `UNASSIGNED`, brief intact — never into a shared queue |
+| `push` | offered to another mailbox that accepts it |
+
+**A returned rejection is final.** Another worker may already hold that task, so approving the
+old proof afterwards would pay twice for one task. A second `PATCH` on it returns `409`:
+
+```json
+{ "error": "This rejection returned the task to be done again, so its verdict can no longer change",
+  "status": "rejected", "task_released_at": "2026-08-21T10:00:00.000Z" }
+```
+
+Read the proof to check before you ask — the owner's copy carries `task_released_at`, and
+`can_revise` is `false` with `revision_blocked_by_requeue: true`.
+
+**When there is nothing to return**, the rejection still stands and `requeued` comes back
+`false` with a reason. That happens on `push` and `inbound_proof` gigs where the
+`task_identifier` is free-form — a URL, a ticket number — and names no task row:
+
+```json
+→ { "success": true, "status": "rejected", "requeued": false,
+    "requeue_error": "This gig's task identifier does not name a task that can be returned" }
+```
+
+Nothing is lost in that case: the proof keeps its undo, exactly as a `requeue: false` rejection
+does.
+
+**One live proof per task.** A task may collect several rejected attempts over its life, but
+only one proof owns it at a time. Every other rule follows from that — a released attempt no
+longer blocks a new submission, no longer stops you recycling or repricing or editing the task,
+and no longer counts against the worker's open-task cap.
+
+## Change a verdict (undo an accidental approve or reject)
+
+Send the same `PATCH` again with the other verdict. There is no separate undo endpoint.
+
+```json
+PATCH /gigs/:id/proofs/:proof_id
+
+{ "action": "approve", "feedback": "Rejected this by mistake — approved." }   // was rejected
+{ "action": "reject", "rejection_tag": "incomplete" }                          // was approved
+
+→ { "success": true, "status": "approved", "revised": true, "previous_status": "rejected" }
+```
+
+**The window closes when a payout picks the proof up.** The daily cron rolls approved proofs into
+a payout, and sweeps rejected ones into a $0 rollup so they stop being reconsidered. Once either
+happens the verdict is final and a second `PATCH` returns `409`:
+
+```json
+{ "error": "This proof was already settled in a payout and its verdict can no longer change",
+  "status": "approved", "rollup_id": "ROLLUP_...", "rollup_status": "paid" }
+```
+
+So an undo is same-day work. To check before you ask, read the single proof — the owner's copy
+carries `can_revise` on any `approved` or `rejected` proof:
+
+```json
+GET /gigs/:id/proofs/:proof_id
+→ { "status": "rejected", "can_revise": true, "revision_blocked_by_rollup_id": null }
+```
+
+A rollup is not the only thing that closes the window. A rejection that returned its task is
+final from the moment it was made — see "A rejection returns the task by default" above.
+
+What a revision changes:
+
+- `feedback` is replaced by what you send now, and **cleared if you omit it**. The old note
+  belonged to the verdict you are replacing.
+- `rejection_tag` is cleared when you change to `approve`, and required when you change to
+  `reject`.
+- Reputation counts one verdict per proof — the latest. An undone rejection costs the worker
+  nothing.
+- `locked_price` follows the normal rule: `amount` is accepted only on a proof still priced
+  `null` or carrying an `asking_price`.
+
+`timeout_approved` cannot be revised. The cron approved it, not you — dispute it with
+`POST .../report` instead.
 
 ## Rejection tags and what they cost
 
@@ -166,13 +388,19 @@ POST /public/submit-proof { ..., "private_note": "Licence key: ABC-123-XYZ" }
 
 Optional, at most 8000 characters, on both submit routes. A blank string means "none".
 
-Every proof response carries two fields for it:
+Every proof response carries two fields for it, and the three states are readable from
+`private_note` **alone** — you never have to cross-check the boolean to know where you stand:
 
-| Field | Meaning |
-|---|---|
-| `private_note_locked: true` | A note exists and is being withheld. `private_note` is `null`. |
-| `private_note: "..."` | Released. `private_note_locked` is `false`. |
-| both falsy | The worker attached no private note at all. |
+| `private_note` | `private_note_locked` | Meaning |
+|---|---|---|
+| `""` | `false` | The worker attached no note. Nothing is coming, now or ever. |
+| `null` | `true` | A note exists and is being withheld. Pay for the proof and read it again. |
+| `"..."` | `false` | Released. |
+
+The empty string is the point: `""` means *nothing was attached* and `null` means *you have not
+paid yet*. Reporting `null` for both would leave a client who has already paid unable to tell a
+worker who sent nothing from a note they still have to unlock. Both values are falsy, so
+`if (!private_note)` still means "there is nothing to read right now".
 
 **The release condition is payment, not approval.** The note opens only when the proof is
 `approved` or `timeout_approved` **and** a rollup has stamped `paid_out_at` on it — meaning the
@@ -231,7 +459,7 @@ https://dollarplatoon.com/submit/SHARE_TOKEN
 | POST | `/public/submit-proof` | No | Submit a proof |
 | POST | `/public/task/decline` | No | Skip a task |
 | POST | `/public/task/violation` | No | Report a task |
-| POST | `/public/upload-presign` | No | Presigned upload URL |
+| POST | `/public/upload-presign` | No | Presigned upload URL (any type, 100MB max) |
 
 ```json
 POST /public/submit-proof
@@ -283,9 +511,19 @@ need explicit attributes.
 
 ```json
 POST /upload/presign
-{ "filename": "screenshot.png", "content_type": "image/png", "prefix": "proofs" }
-→ { "presigned_url": "https://s3...", "url": "https://s3...", "key": "proofs/...", "bucket": "..." }
+{ "filename": "delivery.zip", "content_type": "application/zip", "prefix": "proofs", "content_length": 5242880 }
+→ { "presigned_url": "https://s3...", "url": "https://s3...", "key": "proofs/...", "bucket": "...", "max_bytes": 104857600 }
 ```
 
 PUT the file to `presigned_url`, then put the returned `url` in your proof's `proofs` array.
 Prefixes: `"proofs"` (default), `"avatars"`, `"gig-icons"`. The presigned URL expires in one hour.
+
+Any file type is accepted — image, document, video, archive, design file. The limit is **100MB
+per file**. Use `application/octet-stream` when you do not know the content type.
+
+Send `content_length` with the exact byte count of the file. The API refuses a larger value with
+`413`, and it signs the count into the URL, so the upload fails if the byte count does not match.
+`content_length` is optional for older clients, but without it the size is not enforced.
+
+The key holds a random UUID, so nobody can guess it. The bucket blocks public access; a proof URL
+is signed for one hour when the API returns it. Files expire after 365 days.

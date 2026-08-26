@@ -153,8 +153,20 @@ PATCH /gigs/:id/proofs/:proof_id
   `fake_proof` costs a worker five times what `low_quality` does.
 - **Use `not_selected` when you simply hired someone else.** It is the one tag excluded from
   scoring entirely, which is what makes free application tasks safe to run.
+- **A rejection returns the task by default.** The work goes back out so somebody else can do
+  it. Send `"requeue": false` to close the task with the proof — which is what you want on a
+  hiring gig, where rejecting the other applicants must not re-post the job. A returned
+  rejection is final: another worker may hold that task now, so its verdict cannot change.
 - **`feedback` is read by the worker on approvals too.** On an `inbound_proof` gig the proof *is*
   the application, so the approval is where you answer: "you're in, join the groupchat: <link>".
+- **Changed your mind? Send the same `PATCH` with the other verdict.** An accidental reject
+  becomes an approval, and the reverse — until a payout picks the proof up, which the daily cron
+  does. After that the call returns `409`.
+- **A pending proof can disappear.** A worker may withdraw their own submission back to a private
+  draft for as long as you have not reviewed it, and it then leaves your dashboard entirely. You
+  never see a draft. If they send it again the webhook fires a second time carrying
+  `"resubmitted": true`, and your review window restarts from that moment. Reviewing a proof ends
+  this — once you have approved or rejected, the verdict is yours alone.
 - Automate it by setting `proof_webhook_url` on the gig and routing submissions to your own
   validator or agent.
 

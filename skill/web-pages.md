@@ -7,6 +7,9 @@ control them.
 
 - Autologin deep links
 - Universal URL params
+- The Task page — one task, on a page of its own
+- Notifications — the bell in the navbar
+- The Share Proof link — one proof, on its own review page
 - The Insert Task page — put work in without an account
 - The Submit page — hand in work without an account
 - Feed reader pages
@@ -62,6 +65,90 @@ https://dollarplatoon.com/gigworker/mailboxes?api_key=KEY&hide_navbar=true&hide_
 # A whitelabel public submit page (no key needed — the share token is the credential)
 https://dollarplatoon.com/submit/SHARE_TOKEN?hide_logo=true
 ```
+
+## The Task page — one task, on a page of its own
+
+`/claim/:gig_id/:task_id` and `/task/:gig_id/:task_id` are the same page. It shows one task, its
+comments, and — when the task is claimable — an **Accept this task** button. The client copies the
+link from **Share task…** in the task's detail pane in the dashboard.
+
+```
+# claimable: the first person to open it takes the task
+https://dollarplatoon.com/claim/GIG_01HX.../TASK_01KV...
+
+# with a gig invite, so somebody who has not joined can use it
+https://dollarplatoon.com/claim/GIG_01HX.../TASK_01KV...?invite=abc123def456
+
+# view-only: readable and commentable by every member, claimable by nobody
+https://dollarplatoon.com/task/GIG_01HX.../TASK_01KW...
+```
+
+Unlike `/insert/` and `/submit/`, this page has **no per-task token**. Gig membership is the
+credential, so a visitor who has not joined sees the gig's join link instead of the task, and a
+signed-out visitor is sent to sign in and returned here afterwards. That makes the URL safe to
+paste into a chat of workers who all belong to the gig: the first to open it wins, and everybody
+else is told it is taken.
+
+**`?invite=<token>` extends it to people who have not joined.** The token is a gig invite from
+`POST /gigs/:id/invites`. The "you have not joined" panel then becomes "you are invited": joining
+returns the reader to this task rather than to a mailbox list. Use an unlimited invite for a link
+that goes to more than one person. The **Share task…** dialog picks one and turns it on by default,
+and offers to mint an unlimited invite when the gig has none.
+
+**A reserved task keeps the button, and nobody is racing you for it.** No poll offers a reserved
+task, so the link is the only way in and it can sit unopened for as long as it takes. If the
+reservation names one worker, everybody else who opens the link is told so plainly — "reserved
+for another worker", not "somebody took it", because nobody did.
+
+**A view-only task drops the button.** Nobody can claim it, so the page is the brief plus the
+comment thread — which is how one link can go to a dozen people at once. See
+[tasks.md](https://dollarplatoon.com/skill/tasks.md).
+
+The claimable page is the pull half of `?assign_to=`. Use `assign_to` to push a task at a named
+worker; use this link when you want a worker you chose to take it themselves. Every poll limit
+still applies — see [queue.md](https://dollarplatoon.com/skill/queue.md) for
+`POST /gigs/:id/queue/:msgId/claim` and its `reason` codes.
+
+## Notifications — the bell in the navbar
+
+`/notifications` lists what has happened on this account, newest first: comments on your tasks,
+proofs waiting for review, verdicts on your work, and payouts. Each row opens in a new tab at the
+exact task or proof.
+
+```
+https://dollarplatoon.com/notifications
+```
+
+The bell shows a **red dot**, never a count: the dot is on when something arrived after the last
+time you opened the page **and** within the last 24 hours. Opening the page puts it out.
+
+| Route | Auth | Description |
+|---|---|---|
+| `GET /notifications?cursor=` | Account | The list, newest first |
+| `GET /notifications/summary` | Account | `{ dot, latest_at, latest_title, seen_at }` |
+| `POST /notifications/seen` | Account | Mark everything seen — the dot goes out |
+
+Notifications are written by the events themselves; nothing posts one directly. A comment reaches
+the gig owner, and the client's reply reaches the people in that thread — never the whole gig, and
+never anybody who is not allowed to read the comment. A **private reply** notifies exactly its one
+addressee. Rows expire after 90 days.
+
+## The Share Proof link — one proof, on its own review page
+
+`/client/gig/:gig_id/proofs/:proof_id` opens a single proof on the client's review page, with the
+approve and reject controls on it. The worker copies the link from the **Share Proof** button in
+the proof detail pane of `/gigworker/mailboxes`.
+
+```
+https://dollarplatoon.com/client/gig/GIG_01HX.../proofs/PROOF_01HX...
+```
+
+**The gig owner is the only reader.** There is no token: the page needs a signed-in account that
+owns the gig, so a leaked link shows nothing to anybody else. Add `?api_key=` only if the link
+goes to the owner over a private channel.
+
+Use it to chase one review — a proof sent by email, chat, or a support thread — instead of asking
+the client to find the proof in the dashboard.
 
 ## The Insert Task page — put work in without an account
 
@@ -130,7 +217,7 @@ including the `?task=` opt-in and the skip/report actions, in
 |------|-----|
 | Registry | `/feed/<feed_id>/registry` |
 | Notifications | `/feed/<feed_id>/notifications` |
-| Members (owner only) | `/feed/<feed_id>/members` |
+| Settings, members, invites (owner only) | `/client/feed/<feed_id>` |
 | Accept an invite | `/feed/<feed_id>/join?invite=<token>` |
 
 These render **inside the app**, with the navbar and footer, like every other signed-in page —
@@ -221,8 +308,7 @@ and prompts are rendered in-page instead.
 | `/client/gigs` | Client — your gigs. Create Gig sits at the top right. |
 | `/client/gig/:id/dashboard` | Client — one gig: tasks, proofs, mailboxes, payouts. |
 | `/client/feeds` | Client — your feeds. |
-| `/client/feed/:id` | Client — one feed's settings and its invite links. |
-| `/feed/:id/members` | Feed owner — who is in the feed, and their scopes. |
+| `/client/feed/:id` | Feed owner — one feed: details, members and their scopes, invite links. |
 | `/gigworker/mailboxes` | Worker — your mailboxes and their tasks. |
 | `/gigworker/feeds` | Worker — feeds you have joined. |
 | `/gigworker/earnings` | Worker — what you have been paid. |
@@ -230,3 +316,7 @@ and prompts are rendered in-page instead.
 | `/feed/:id/join?invite=` | Anyone — accept a feed invite. |
 | `/submit/:token` | Share-token holder — hand in work, no account. |
 | `/insert/:gig_id?token=` | Token holder — put work in, no account. |
+| `/claim/:gig_id/:task_id?invite=` | Joined worker — accept one exact task. `?invite=` lets a stranger join on the way in. |
+| `/task/:gig_id/:task_id` | Any member — read and comment on one task. The same page; the name that fits a view-only task. |
+| `/notifications` | Any account — comments, proofs, verdicts and payouts, newest first. |
+| `/client/gig/:id/proofs/:proof_id` | Gig owner — review one proof on its own ("Share Proof"). |

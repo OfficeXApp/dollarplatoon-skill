@@ -110,7 +110,7 @@ because the partition is narrow — and it is why page size is not the same as r
 | `409` | A conflict with existing state: a duplicate `task_identifier`, a task already claimed by someone else, a price already locked by a proof, a wallet registered to another account. |
 | `410` | Gone. The task expired, or you called `GET /gigs` (the public marketplace was removed — gigs are private networks reached by invite). |
 | `413` | Task payload over 2,000,000 characters. The body names the size received and the maximum. |
-| `429` | Rate limited. The body carries a `rate_limit` object with `retry_at`. |
+| `429` | Rate limited. The body carries a `rate_limit` object with `retry_at` — or an `open_tasks` object, which no amount of waiting clears. |
 
 Error bodies are always `{ "error": "human readable reason" }`, sometimes with extra fields such
 as `reason`, `rate_limit`, or `existing_proof_id`.
@@ -121,11 +121,16 @@ actually refused the request — check the header before parsing the body as JSO
 
 ## Rate limits
 
-Two independent systems:
+Three independent systems:
 
 - **Worker rate limits** are set per gig (`default_rate_limit_count` / `default_rate_limit_minutes`)
   and can be overridden per mailbox. They cap proofs submitted plus queue tasks claimed. Hitting
   one returns `429` with `{ count, minutes, source, used, remaining, retry_at }`. See
+  [gigs.md](https://dollarplatoon.com/skill/gigs.md).
+- **Open task caps** are set per gig (`default_max_open_tasks`) and can be overridden per mailbox.
+  They cap how many tasks one worker may hold with no proof submitted — a standing ceiling, where
+  the rate limit is a rolling window. Hitting one returns `429` with
+  `{ max_open_tasks, source, open, remaining }`, and only a proof or a skip clears it. See
   [gigs.md](https://dollarplatoon.com/skill/gigs.md).
 - **Public endpoint limits** apply to share-token and invite routes: roughly 10–30 requests per
   minute per token, plus 60 per minute per caller IP. A caller that tries ten unknown tokens in a

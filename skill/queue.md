@@ -9,6 +9,7 @@ compete for the same task.
 - Queue order
 - Routes
 - Polling for tasks
+- Claiming one named task (share link)
 - Declining a task
 - Setting priority
 - Direct assignment to one worker
@@ -59,9 +60,12 @@ it turns on the priority column in the dashboard — but reordering works in any
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | POST | `/gigs/:id/queue/poll` | Worker | Claim tasks |
+| POST | `/gigs/:id/queue/:msgId/claim` | Worker | Claim ONE named task |
 | POST | `/gigs/:id/queue/:msgId/decline` | Worker | Skip a task, for you only |
 | GET | `/gigs/:id/queue` | Member | List queued tasks with `tags`, `price`, `priority`, `declined_count` |
+| GET | `/gigs/:id/reserved` | Owner or member | Tasks held back from the queue. Owner sees all; a worker sees their own |
 | GET | `/gigs/:id/tasks/:msgId` | Owner, holder, or member | One task with its full body |
+| PATCH | `/gigs/:id/tasks/:msgId/availability` | Owner | `open`, `reserved` (with `reserved_for`), or `view_only` |
 | PATCH | `/gigs/:id/tasks/:msgId/priority` | Owner | Move one queued task |
 | PATCH | `/gigs/:id/queue/priorities` | Owner | Reorder up to 100 tasks in one call |
 | PATCH | `/gigs/:id/tasks/:msgId/price` | Owner | Set what one task pays |
@@ -90,12 +94,14 @@ POST /gigs/:id/queue/poll   { "count": 2 }   // default 2, max 20
       "forwarded_at": "...", "claimed_at": "...",
       "price": 2.50, "price_tbd": false,
       "tags": ["shortform"],
+      "reserved_for_me": false,
       "source_task_id": null }
   ],
   "count": 1,
   "scan_exhausted": false,
   "filter_applied": false,
-  "rate_limit": { "count": 5, "minutes": 60, "source": "gig", "used": 3, "remaining": 2, "retry_at": null }
+  "rate_limit": { "count": 5, "minutes": 60, "source": "gig", "used": 3, "remaining": 2, "retry_at": null },
+  "open_tasks": { "max_open_tasks": 3, "source": "gig", "open": 1, "remaining": 2 }
 }
 ```
 
@@ -104,8 +110,20 @@ declined. Tasks are never pushed to a mailbox in a queue gig — you must poll.
 
 **Read `price` and `tags` per task, not per gig.** The gig price is only a default.
 
+**Your own reservations come first.** A task the client reserved for you is served ahead of the
+shared queue, and comes back with `reserved_for_me: true`. It ignores the queue order and your
+own tag filter — the client named you for that task, so a standing preference does not drop it.
+It does not dodge your limits: it costs a slot like any other claim. A gig can hold tasks
+reserved for you indefinitely; nobody else is ever offered them. See
+[tasks.md](https://dollarplatoon.com/skill/tasks.md), and `GET /gigs/:id/reserved` to look at
+what is waiting for you without claiming it.
+
 **Poll after every proof.** Submitting does not fetch more work. A claim and its proof together
 cost one slot against your rate limit, not two.
+
+**Two ceilings, not one.** `rate_limit` is per window and refills with time. `open_tasks` counts
+what you hold unproven right now and never refills on its own — submit or skip to free a slot.
+Both trim `count` down rather than failing the poll; both return `429` only at zero.
 
 **In `queue_solo`**, each returned task is a private copy with its own `id`. Use that `id` as your
 `task_identifier` — never `source_task_id`, which is shared and will be rejected. Nobody competes
@@ -126,6 +144,73 @@ allowance — asking for 10 with 2 left returns 2.
 
 Filtering a poll by tags and price: see
 [pricing-and-tags.md](https://dollarplatoon.com/skill/pricing-and-tags.md).
+
+## Claiming one named task (share link)
+
+A poll asks for whatever the queue order offers next. This asks for **one exact task**:
+
+```json
+POST /gigs/:id/queue/:msgId/claim   { "mailbox_id": "MBX_..." }
+→ { "success": true, "mailbox_id": "MBX_...", "task": { ... }, "rate_limit": {...}, "open_tasks": {...} }
+```
+
+`mailbox_id` is optional. The response `task` is shaped exactly like one entry of a poll,
+`private_details` included — the task is yours now.
+
+**The link.** Every task has a page at `https://dollarplatoon.com/claim/:gigId/:taskId`. The owner
+copies it from the task's detail pane in the dashboard and sends it to a worker. Opening it and
+pressing **Accept this task** calls the endpoint above. This is the pull half of `?assign_to=`:
+`assign_to` pushes the task at a named worker; the link lets a worker you chose take it themselves.
+
+**Membership is the credential — but the link can carry the invite.** There is no per-task token.
+A visitor who has not joined the gig sees a join link instead of the task, so the URL is safe to
+paste into a chat of workers who all belong to the gig. The first to open it wins.
+
+Add `?invite=<token>` — a gig invite token from `POST /gigs/:id/invites` — and the link works for
+somebody who has **not** joined yet: they are offered the gig, and joining sends them straight back
+to this task instead of to a mailbox list.
+
+```
+https://dollarplatoon.com/claim/GIG_01HX.../TASK_01KV...?invite=abc123def456
+```
+
+Use an **unlimited** invite (`max_uses: null`) for a link that goes to more than one person; a
+3-use token is dead on the fourth reader. Never use an email-bound invite: it names one person, so
+everybody else who follows the link is refused. The dashboard's **Share task…** dialog picks the
+right one for you and turns the invite on by default.
+
+A **reserved** task is the common case for a link like this: no poll offers it at all, so the
+link is the only way in and it can sit in somebody's inbox for a week without another worker
+sweeping it up. A reservation can also name one worker, and then only that worker's poll and only
+their claim will take it.
+
+A **view-only** task cannot be claimed at all. Its link is `/task/:gig_id/:task_id` (the `/claim/`
+form still works and shows the same page), and it exists so one link can go to many people without
+the first of them taking the work.
+
+Both are in [tasks.md](https://dollarplatoon.com/skill/tasks.md).
+
+**Same limits as a poll.** The proof rate limit and the open-task cap both apply and both return
+`429`. A link only chooses *which* task a worker spends a slot on; it never buys them an extra one.
+
+**Answers.** Every failure carries a machine-readable `reason`:
+
+| Code | `reason` | Meaning |
+|------|----------|---------|
+| 403 | `not_joined` | The caller has no mailbox in this gig |
+| 403 | `mailbox_inactive` | Joined, but their mailbox is not active |
+| 409 | `taken` | Another worker claimed it first, or the last solo slot went |
+| 409 | `assigned_elsewhere` | The owner assigned it to a named worker |
+| 409 | `withdrawn` | The owner took it back (`UNASSIGNED`) |
+| 409 | `exhausted` | `queue_solo`: `max_claims_per_task` is used up |
+| 409 | `other_worker` | `queue_solo`: this id is another worker's copy — link the template |
+| 409 | `already_proven` | A proof was already submitted against it |
+| 409 | `view_only` | The client published it for reading only — nobody can claim it |
+| 409 | `reserved_for_other` | Reserved for a different worker. Nobody took it; it was never on offer to you |
+| 404 | `not_found` | Deleted |
+
+Re-opening the link after a successful claim returns `200` with `already_held: true`. It claims
+nothing a second time and spends no rate-limit slot, so the link is safe to bookmark.
 
 ## Declining a task
 
@@ -285,8 +370,13 @@ a private copy to each of N applicants. On a shared `queue` gig post N separate 
 **3. Review, and REJECT them all with `not_selected` — including the winner's.**
 
 ```json
-PATCH /gigs/:id/proofs/:proof_id   { "action": "reject", "rejection_tag": "not_selected" }
+PATCH /gigs/:id/proofs/:proof_id
+{ "action": "reject", "rejection_tag": "not_selected", "requeue": false }
 ```
+
+**`"requeue": false` is not optional here.** A rejection returns its task to be done again by
+default, which is right for real work and wrong for an application: leaving it out re-posts the
+application task and invites the next applicant to apply for a job you have already filled.
 
 This is the counter-intuitive step, and it matters twice over:
 

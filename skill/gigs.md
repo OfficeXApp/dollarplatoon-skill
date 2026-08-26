@@ -64,6 +64,8 @@ POST /gigs
   "default_task_tags": ["shortform"],    // stamped on tasks that arrive untagged
   "default_rate_limit_count": 5,         // worker throttle; both fields or neither
   "default_rate_limit_minutes": 60,
+  "default_max_open_tasks": 3,           // tasks one worker may hold unproven; null = unlimited
+  "allow_price_offers": false,           // let workers quote their own price per proof
   "min_rep_volume": null,
   "min_rep_quality": null,
   "min_rep_recency": null,
@@ -103,7 +105,12 @@ can actually pay.
 `PATCH /gigs/:id` accepts any subset of: `title`, `price`, `terms`, `status`, `review_timeout`,
 `task_timeout`, `tags`, `default_task_tags`, `join_policy`, `distribution`, `requires_approval`,
 `min_payout`, `location`, `notes`, `proof_webhook_url`, `join_webhook_url`, `contract_address`,
-`default_rate_limit_count`, `default_rate_limit_minutes`. `tags` replaces the whole list.
+`default_rate_limit_count`, `default_rate_limit_minutes`, `default_max_open_tasks`,
+`allow_price_offers`. `tags` replaces the whole list.
+
+`allow_price_offers` lets a worker send `asking_price` with a proof. The ask is a quote: it never
+becomes the payout unless you approve at that amount, and a review that times out still pays the
+gig price. See [proofs.md](https://dollarplatoon.com/skill/proofs.md).
 
 ## Invite links
 
@@ -160,6 +167,26 @@ claiming ahead.
 - Submitting a proof for a task you already claimed is **never** blocked — the claim was counted
   at poll time, so the loop never double-charges.
 
+## Open task cap
+
+The rate limit above is a rolling window, so a task a worker holds stops counting against it once
+the claim ages out. "5 per hour" therefore lets one worker take 5 more tasks every hour and prove
+none of them. The open task cap is the standing ceiling the window cannot express: **how many
+tasks one worker may hold with no proof submitted, at any moment**.
+
+- Gig-wide default: `default_max_open_tasks` (positive integer, or `null` for unlimited).
+- Per worker: `PATCH /gigs/:id/mailboxes/:mbx_id` with `max_open_tasks` (owner only; `null`
+  reverts to the gig default).
+- At the cap, `/queue/poll` returns `429` with an `open_tasks` object:
+  `{ max_open_tasks, source: "gig"|"mailbox", open, remaining }`. Under the cap, a poll is
+  trimmed to the slots left, and the same object rides on the response.
+- A task with a proof against it is not open — the worker is waiting on review, not hoarding.
+  Assigned tasks and `queue_solo` copies do count.
+- The only ways to free a slot: submit a proof, skip the task, report it, or let it expire.
+
+Pair it with `task_timeout`. The cap stops a worker taking more; the timeout takes back what
+they already hold.
+
 ## Task expiry
 
 Set `task_timeout` (seconds) to give workers a deadline. The clock starts when a task is claimed
@@ -168,6 +195,11 @@ Set `task_timeout` (seconds) to give workers a deadline. The clock starts when a
 - After expiry, proof submission, skip, and report all return `410 Gone`.
 - Unclaimed queue items never expire.
 - Task listings carry `expires_at` and `expired`.
+- **An expired task returns to the pool by itself.** The sweep runs on ordinary gig traffic (at
+  most once a minute), and the daily cron catches a gig nobody polled. It recycles the task
+  exactly as the route below does, so an expired hold is released even if you never look.
+  `tasks_received` is **not** given back on an expiry — running out of time is what
+  `response_rate` measures. An owner recycling by hand still discounts it, as before.
 
 ```json
 POST /gigs/:id/tasks/:msgId/extend
