@@ -312,10 +312,28 @@ curl -X PATCH ".../gigs/GIG_abc" -d '{"default_comments_policy": "public"}'
 ```
 
 **A private reply has exactly two readers** — its author and the person it answers — whatever the
-policy says, and **including the gig owner**, who cannot read one they are not part of. That is
-what makes the bidding pattern work end to end: run the thread in `public` so everybody can see
-the offers, then send the winner their invite link as a private reply that the losing bidders
-never see.
+policy says, and **including the gig owner**, who cannot read one they are not part of.
+
+### The bidding round, end to end
+
+That is what makes this work, and it is the pattern the whole feature is shaped around:
+
+1. Publish the task **`view_only`** and share its **read-only** link (`/task/:gig_id/:task_id`).
+   Nobody can take it, so the link is safe in a group chat or a feed.
+2. Set the comments **`public`**. Workers bid where everybody can see the offers.
+3. Pick a winner and **reserve the task for them**:
+   `PATCH .../availability {"availability":"reserved","reserved_for":"ana@example.com"}`.
+4. Send them the **claim** link as a **private reply**. Nobody else can read it, and nobody else
+   can use it — a losing bidder who somehow got the URL is told
+   `409 { "reason": "reserved_for_other" }`.
+
+Reserve **before** you send the link, so it is already inert in anybody else's hands by the time
+it exists. In the dashboard all of step 3 and 4 is one action: **⋯ → Give task to \<name\>** on
+that worker's comment.
+
+Comments read by the gig owner carry `author_mailbox_id`, which is what step 3 needs. No other
+reader gets it: on a public bidding thread it would tell each bidder exactly who they are bidding
+against.
 
 The response is a flat list; every reply carries `thread_id`, and what comes back is already
 filtered to what you may read.
@@ -325,6 +343,7 @@ filtered to what you may read.
     "comments": [
       { "id": "TCOMMENT_01KW...", "thread_id": null, "body": "I can do this by Friday for $40.",
         "author_display_name": "ana", "author_role": "gigworker", "is_mine": false,
+        "author_mailbox_id": "MBX_01KR5...",
         "private": false, "deleted": false, "created_at": "2026-08-25T10:00:00.000Z" },
       { "id": "TCOMMENT_01KX...", "thread_id": "TCOMMENT_01KW...", "body": "You won. Invite: https://…",
         "author_role": "client", "is_mine": true, "private": true,
@@ -337,8 +356,9 @@ Task reads carry `availability` and `reserved_for`. Owner-facing ones (the dashb
 (`"task"` or `"gig"`), and `comment_count` — the number of comments in the **open**
 conversation, which is why a private reply does not move it.
 
-Bylines are **display names, never email addresses**. A comment is at most 4000 characters, and a
-task holds at most 1000 comments. Deleting one leaves a tombstone (`deleted: true`) so its replies
+Bylines are **display names, never email addresses**, and `author_mailbox_id` is present only
+when the gig owner is reading. A comment is at most 4000 characters, and a task holds at most
+1000 comments. Deleting one leaves a tombstone (`deleted: true`) so its replies
 keep their place. A caller who has not joined the gig gets
 `403 { "reason": "not_a_member" }` — the task page turns that into a join link.
 

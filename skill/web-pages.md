@@ -66,28 +66,49 @@ https://dollarplatoon.com/gigworker/mailboxes?api_key=KEY&hide_navbar=true&hide_
 https://dollarplatoon.com/submit/SHARE_TOKEN?hide_logo=true
 ```
 
-## The Task page — one task, on a page of its own
+## The Task page — one task, and two links to it
 
-`/claim/:gig_id/:task_id` and `/task/:gig_id/:task_id` are the same page. It shows one task, its
-comments, and — when the task is claimable — an **Accept this task** button. The client copies the
-link from **Share task…** in the task's detail pane in the dashboard.
+Every task has **two links**, and the difference is which one hands the work over:
+
+| Link | What it does |
+|---|---|
+| `/task/:gig_id/:task_id` | **Read-only.** Shows the task and its comments. Never offers the claim, whatever the task allows. |
+| `/claim/:gig_id/:task_id` | The same page, **with** the Accept button, subject to the task's `availability`. |
+
+Post the read link where several workers can see it; send the claim link to one person. The
+dashboard's **Share task…** dialog shows both, and the **⋯** beside it copies either in one
+click.
+
+The read-only link is a scope on the LINK, not a lock on the task: a member who edits the path
+can still claim anything the API would let them claim. The guarantee that nobody *else* takes the
+task comes from the task's own state — make it `view_only`, or reserve it for one worker. Those
+two together are the whole pattern:
+
+1. Publish the task `view_only` and post the **read** link in a group chat or a feed.
+2. Workers read it and bid in the comments.
+3. Reserve the task for the winner (`availability: reserved`, `reserved_for: <them>`).
+4. Send the **claim** link as a **private reply** — only they can read it, and only they can use
+   it. In the dashboard this is one action: **⋯ → Give task to <name>** on their comment.
+
+Even if the claim link leaks, it is inert in anybody else's hands: they get
+`409 { "reason": "reserved_for_other" }`.
 
 ```
-# claimable: the first person to open it takes the task
+# read-only: the task and its comments, never the claim
+https://dollarplatoon.com/task/GIG_01HX.../TASK_01KW...
+
+# claimable: subject to the task's availability
 https://dollarplatoon.com/claim/GIG_01HX.../TASK_01KV...
 
-# with a gig invite, so somebody who has not joined can use it
+# either one, with a gig invite so somebody who has not joined can use it
 https://dollarplatoon.com/claim/GIG_01HX.../TASK_01KV...?invite=abc123def456
-
-# view-only: readable and commentable by every member, claimable by nobody
-https://dollarplatoon.com/task/GIG_01HX.../TASK_01KW...
 ```
 
 Unlike `/insert/` and `/submit/`, this page has **no per-task token**. Gig membership is the
 credential, so a visitor who has not joined sees the gig's join link instead of the task, and a
 signed-out visitor is sent to sign in and returned here afterwards. That makes the URL safe to
-paste into a chat of workers who all belong to the gig: the first to open it wins, and everybody
-else is told it is taken.
+paste into a chat of workers who all belong to the gig: on an open task the first to open the
+claim link wins, and everybody else is told it is taken.
 
 **`?invite=<token>` extends it to people who have not joined.** The token is a gig invite from
 `POST /gigs/:id/invites`. The "you have not joined" panel then becomes "you are invited": joining
@@ -317,6 +338,6 @@ and prompts are rendered in-page instead.
 | `/submit/:token` | Share-token holder — hand in work, no account. |
 | `/insert/:gig_id?token=` | Token holder — put work in, no account. |
 | `/claim/:gig_id/:task_id?invite=` | Joined worker — accept one exact task. `?invite=` lets a stranger join on the way in. |
-| `/task/:gig_id/:task_id` | Any member — read and comment on one task. The same page; the name that fits a view-only task. |
+| `/task/:gig_id/:task_id` | Any member — read and comment on one task. Never offers the claim, whatever the task allows. |
 | `/notifications` | Any account — comments, proofs, verdicts and payouts, newest first. |
 | `/client/gig/:id/proofs/:proof_id` | Gig owner — review one proof on its own ("Share Proof"). |
