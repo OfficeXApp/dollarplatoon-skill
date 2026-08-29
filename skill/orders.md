@@ -12,6 +12,7 @@ here in both halves.
 - Open a shop — the vendor's side
 - `list_price`, and why `gig.price` is pinned to 0
 - Free shops (`list_price: 0`)
+- Closing a PAID order machine
 - Fee-INCLUSIVE pricing: what the deposit actually buys
 - The order lifecycle
 - Place an order — the participant's side, end to end
@@ -176,7 +177,7 @@ What changes downstream:
 | Rollups | one per settled order | none, ever (`409 free_order`) |
 | Approval | revisable until a rollup carries it | **final** (`409 free_order_approved`) |
 | Undo | returns the deposit on chain | closes the order, returns nothing |
-| Closing the shop | refused (`409 inbound_order`) | allowed |
+| Closing the shop | allowed once nothing is unsettled | always allowed |
 
 The approval being final is the one asymmetry worth reading twice. On a paid order the payout
 stamp is what closes the verdict; a free order never gets one, and approval is what *releases the
@@ -187,14 +188,42 @@ because a rejection releases nothing.
 A free cancel writes **no reputation event**. Those are keyed on the depositor's wallet address,
 and a free order has no depositor.
 
-**A free shop can be closed** — `PATCH /gigs/:id {"status":"closed"}`, or `DELETE /gigs/:id`,
-which writes the same field. A **paid** shop still refuses both (`409`), because closing takes a
-gig out of `scanActiveGigs()` and therefore out of the cron payout sweep — the backstop that pays
-a vendor whose buyer never pressed the button. A free shop has no sweep to leave.
+**A free shop can always be closed** — `PATCH /gigs/:id {"status":"closed"}`, or `DELETE /gigs/:id`,
+which writes the same field. It has no deposits and no sweep.
 
 Closing stops **new** orders only (`409`, "This shop is not open"). Orders already in flight run to
 their end: auto-approval is a query over proof rows and never reads a gig, and delivery, the
 verdict and the undo have no gig-status check either. Reopen with `{"status":"active"}`.
+
+## Closing a PAID order machine
+
+Allowed too, but only while no order is unsettled. Closing takes a gig out of `scanActiveGigs()`,
+and two cron sweeps read that scan: `processApprovedProofs` (the payout backstop for a buyer who
+approved and never pressed the button) and `reconcilePendingDeposits`. So the refusal asks about
+the money, not about the mode:
+
+| Deposit state | Blocks the close? | Why |
+|---|---|---|
+| `pending` | **yes** | money may be on chain with nothing recorded; only the reconciler resolves it |
+| `open` | **yes** | in escrow, and the review timeout can still auto-approve it into a payout |
+| `settled` | no | the chain already moved it |
+| `withdrawn` | no | the buyer has it back |
+| `free` | no | there never was any |
+
+An **abandoned** row never blocks, whatever its state — the id was given up on and the salt
+stepped. A ledger read that fails refuses the close (`409 ledger_unreadable`): "we could not tell"
+is not "there is nothing there".
+
+The refusal names the offending deposits so you know what to chase:
+
+```json
+{ "error": "This shop cannot be closed while 2 orders are unsettled. …",
+  "reason": "unsettled_orders", "unsettled": 2,
+  "deposits": [ { "deposit_id": "0x…", "state": "open", "amount": 0.5, "task_id": "TASK_…" } ] }
+```
+
+An `open` deposit clears by the buyer approving the delivery (or undoing the order); a `pending`
+one clears when the reconciler catches up on the next cron run.
 
 ## Fee-INCLUSIVE pricing: what the deposit actually buys
 
