@@ -34,6 +34,12 @@ A proof is the evidence a task was done. It is what triggers payment.
 | PATCH | `/gigs/:id/proofs/:proof_id/alias` | Owner or submitter | Your own private title |
 | POST | `/upload/presign` | Yes | Presigned S3 upload URL |
 
+> **The "Owner" column reads differently on an order machine.** On an `inbound_order` gig the gig
+> owner is the *vendor being judged*, so the verdict, the report and the proof reads belong to the
+> **participant who paid**. The withdraw route is refused outright. Each difference is noted
+> inline below and set out in full in
+> [orders.md](https://dollarplatoon.com/skill/orders.md).
+
 ## Submit a proof
 
 ```json
@@ -165,7 +171,8 @@ reviewed returns `409`.
 
 **Resending restarts the review clock from zero.** The client gets a full `review_timeout` window
 on work they are seeing for the first time. The webhook fires again with `"resubmitted": true`,
-but `proofs_submitted` and your reputation are credited only once, on the first send.
+but `proofs_submitted` is credited only once, on the first send, and only the first send writes
+a `proof_submitted` event.
 
 ### Deleting
 
@@ -219,6 +226,11 @@ PATCH /gigs/:id/proofs/:proof_id
 
 **Review promptly.** Silence is approval: a proof auto-approves after the gig's `review_timeout`
 (default 48 hours). That rule exists to protect workers from a client who disappears.
+
+**On an order machine the reviewer is the participant who paid, not the gig owner.** The owner is
+the vendor who did the work, and this route refuses them — the authority is resolved from the
+task's buyer. `review_timeout` is also the vendor's only structural protection there, which is why
+that mode forbids `-1` (manual review, no auto-approval) and anything under an hour.
 
 **`feedback` is stored on either verdict and the gigworker reads it.** On a rejection it explains
 the problem. On an approval it is your reply to the submission — which is what makes an
@@ -335,8 +347,8 @@ What a revision changes:
   belonged to the verdict you are replacing.
 - `rejection_tag` is cleared when you change to `approve`, and required when you change to
   `reject`.
-- Reputation counts one verdict per proof — the latest. An undone rejection costs the worker
-  nothing.
+- Every verdict writes its own event and none are overwritten, so a revision is visible as a
+  revision. A reader wanting one verdict per proof takes the latest by timestamp.
 - `locked_price` follows the normal rule: `amount` is accepted only on a proof still priced
   `null` or carrying an `asking_price`.
 
@@ -345,8 +357,9 @@ What a revision changes:
 
 ## Rejection tags and what they cost
 
-A `rejection_tag` is required when rejecting. It drives reputation, and the weights differ
-sharply:
+A `rejection_tag` is required when rejecting. It is recorded on the rejection's event and is
+the reason anyone reading the ledger sees. It carries no score — there is no score — so the
+column below is about what each tag MEANS, not what it costs:
 
 | Tag | Weight | Use it for |
 |---|---|---|
@@ -362,9 +375,9 @@ sharply:
 to the denominator. Use it to close out applicants you did not pick, so a worker can apply for ten
 jobs, lose nine, and carry no penalty.
 
-Do not reach for `not_selected` to soften a genuine quality problem. Reputation is the only
-enforcement this platform has, and mislabelling bad work removes the signal everyone else depends
-on.
+Do not reach for `not_selected` to soften a genuine quality problem. The ledger is the only
+signal this platform publishes, and mislabelling bad work removes the one thing everyone else
+depends on.
 
 ## Report an auto-approved proof
 
@@ -374,6 +387,11 @@ POST /gigs/:id/proofs/:proof_id/report   → { "success": true, "status": "repor
 
 Works only on `timeout_approved` proofs — the ones that were approved because you missed the
 window. Reported proofs are excluded from rollups and will not be paid.
+
+**On an order machine `report` works in both directions**, and the row records which
+(`reported_by: "client" | "gigworker"`). It has to: the clock approving a delivery nobody reviewed
+is precisely the buyer's problem, and reporting is their only remedy when the timeout ruled
+against them. An owner-only report there would point the remedy at the wrong party.
 
 ## Private delivery (`private_note`)
 
@@ -416,6 +434,14 @@ which is what keeps the file private while the note is still locked.
 
 A gigworker who submits through a share link (`POST /public/submit-proof`) has no account, so
 they cannot read the note back afterwards. It is write-once from that route.
+
+**On an order machine this field is not optional practice — it is the vendor's only protection.**
+The buyer reads `proofs[]` at review time and may undo the whole order, deposit and all, right up
+until they approve. So put the deliverable in `private_note` and let `proofs[]` carry evidence
+only: a watermarked preview, a hash, a word count, a description. Enough to rule on, not enough to
+use. `POST .../proofs/:proof_id/withdraw` is refused in that mode for the same reason — the buyer
+has already paid and may already have read it, so un-delivering would leave them holding a funded
+order with nothing against it. See [orders.md](https://dollarplatoon.com/skill/orders.md).
 
 ## Private aliases
 

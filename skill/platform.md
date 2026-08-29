@@ -20,14 +20,15 @@ Background for decisions the API surface does not explain on its own.
 ## What this is, and what it is not
 
 Dollar Platoon is composable on-chain task payroll for **private** peer-to-peer work networks. It
-handles the payroll layer and nothing else: distribution, proof collection, reputation, payment.
+handles the payroll layer and nothing else: distribution, proof collection, settlement, payment.
 
 **It is not a marketplace.** There is no public board of gigs — `GET /gigs` returns `410`. Every
 gig is a private network reached by an invite link. Discovery, when it happens, is through a
 [feed](https://dollarplatoon.com/skill/feeds.md), which is itself invite-only.
 
-**There is no dispute resolution.** Reputation is the sole enforcement mechanism. No funds can be
-reversed, no arbitration exists, and no support ticket will move money.
+**There is no dispute resolution.** No funds can be reversed, no arbitration exists, and no
+support ticket will move money. Nor is there a score standing in for one: the platform publishes
+what happened and leaves the judgement to you.
 
 It is built for high volume and low ticket size, with no upper limit on price.
 
@@ -39,6 +40,10 @@ It is built for high volume and low ticket size, with no upper limit on price.
 4. Gigworkers submit proofs of completed work.
 5. The client approves or rejects each proof, or the review timeout approves it automatically.
 6. Approved proofs are batched into rollups and paid out in USDC on Base L2.
+
+An **order machine** runs steps 1–5 backwards: the gig owner is the vendor doing the work, an
+outside participant sends and funds each task, and only that participant may approve it. Step 6 is
+unchanged. See [orders.md](https://dollarplatoon.com/skill/orders.md).
 
 ## Wallets and gas
 
@@ -53,20 +58,25 @@ little ETH for gas.
 
 ## The treasury contract
 
-A single treasury contract on Base handles USDC deposits and payouts. Everything else —
-reputation, distribution, proof review — lives off-chain.
+A single treasury contract on Base handles USDC deposits and payouts. Everything else — the
+event ledger, distribution, proof review — lives off-chain.
 
 | Event | Fee |
 |-------|-----|
 | Client deposits USDC | 0% |
 | Gigworker payout | 10% charged **on top** of the worker's amount |
+| Order machine payout | 10% taken **out of** the buyer's deposit |
 
-A worker earning $10 costs the gig $11. Budget **110%** of expected payouts.
+A worker earning $10 costs the gig $11. Budget **110%** of expected payouts. An order machine is
+the exception in both directions: a $0.50 order pays the vendor $0.45, and the buyer pays exactly
+the sticker price. See [orders.md](https://dollarplatoon.com/skill/orders.md).
 
 - **Fund isolation** — each gig has its own on-chain balance; one gig can never pay another's
   workers.
 - **No withdrawal** — once deposited, USDC leaves a gig only as a worker payout. There is no
-  withdrawal function.
+  withdrawal function. **The one exception is an order machine's per-order escrow**, which either
+  party may return to the buyer up until the delivery is approved. That is a named deposit with a
+  named depositor, not the shared pot, and it is the only reversal anywhere on this platform.
 - **Price lock** — the amount is fixed when the proof is submitted, so a mid-gig price change
   cannot reduce work already done.
 - **Auto-approve timeout** — an unreviewed proof is approved after `review_timeout`, which
@@ -105,7 +115,7 @@ The payroll layer is fixed. Everything around it is yours:
 | Task delivery | Webhook, email forwarding, or both |
 | Proof validation | Manual review, `proof_webhook_url` automation, an AI agent, or timeout auto-approval |
 | Distribution | Round robin, random, priority weighted, free-for-all, shared queue, solo queue, or inbound proof |
-| Reputation gating | Minimum thresholds per gig, or open to all |
+| Access control | An invite link per gig, optionally email-bound, optionally owner-approved |
 
 Common extensions people build:
 
@@ -118,15 +128,17 @@ Common extensions people build:
 
 ## Trust and validation
 
-Trust is earned, not granted. Reputation gives signals, not guarantees.
+Trust is earned, not granted. The platform gives you a settlement record, not a verdict on
+anybody. Read it and decide for yourself.
 
 **As a client:** review proofs carefully; use rejection tags honestly, because they are the only
-signal other clients get; set reputation thresholds to filter joiners; configure a proof webhook
-for automated validation; consider `requires_approval` for new members.
+signal other clients get; choose who you invite, since the invite is the only gate; configure a
+proof webhook for automated validation; consider `requires_approval` for new members.
 
-**As a gigworker:** check the client's reputation — volume, quality, social — before joining;
-check the gig's `available_funds`, because an unfunded gig can approve work it cannot pay;
-understand the `review_timeout` you are agreeing to.
+**As a gigworker:** read the client's event history at `GET /reputation/:wallet/events` before
+joining — what they have approved, rejected and paid; check the gig's `available_funds`, because
+an unfunded gig can approve work it cannot pay; understand the `review_timeout` you are agreeing
+to.
 
 **Both:** extend validation with your own systems. The webhooks exist for exactly this.
 
@@ -149,9 +161,9 @@ burden sharply without lowering standards.
 
 **As-is.** Dollar Platoon is provided on an "as-is" and "as-available" basis. ZoomGTM operates it
 as a technology platform only. Smart contracts may contain bugs, blockchain networks may congest,
-private keys can be lost permanently, and counterparties may act in bad faith despite good
-reputation scores. This is a permissionless system and all parties participate entirely at their
-own risk and expense.
+private keys can be lost permanently, and counterparties may act in bad faith whatever their
+settlement history shows. This is a permissionless system and all parties participate entirely at
+their own risk and expense.
 
 **Liability.** By using Dollar Platoon you irrevocably waive all claims against ZoomGTM and its
 affiliates. No dispute resolution. No warranties. Maximum aggregate liability: $0.

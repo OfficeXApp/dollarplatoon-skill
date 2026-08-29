@@ -149,10 +149,11 @@ PATCH /gigs/:id/proofs/:proof_id
 ```
 
 - **Review promptly.** Silence approves after `review_timeout`.
-- **Always send a `rejection_tag`.** It drives reputation, and the weights differ sharply —
-  `fake_proof` costs a worker five times what `low_quality` does.
-- **Use `not_selected` when you simply hired someone else.** It is the one tag excluded from
-  scoring entirely, which is what makes free application tasks safe to run.
+- **Always send a `rejection_tag`.** It is written to the rejection's event and is the reason
+  anyone reading the worker's ledger will see. It costs them no score — there is no score — but
+  it is the only signal other clients get, so label honestly.
+- **Use `not_selected` when you simply hired someone else.** It says "did not get the job", not
+  "did bad work", which is what makes free application tasks safe to run.
 - **A rejection returns the task by default.** The work goes back out so somebody else can do
   it. Send `"requeue": false` to close the task with the proof — which is what you want on a
   hiring gig, where rejecting the other applicants must not re-post the job. A returned
@@ -199,9 +200,15 @@ is checked first so nobody is paid twice. Treat a single `failed` as "not settle
 | `priority_weighted` | Pushed, weighted by each mailbox's `priority` (1–10). | You want your best workers to get more. |
 | `free_for_all` | Pushed to every active mailbox. | Announcements, or races where you want the first result. |
 | `inbound_proof` | No tasks at all; workers submit proofs directly. | Applications, bounties, anything where the submission *is* the work. |
+| `inbound_order` | **Inverted.** You do the work; outsiders send and fund each order. | You are selling something, not buying it. See [orders.md](https://dollarplatoon.com/skill/orders.md). |
 
 `queue_solo` is the one to think twice about: ten tasks and five workers is fifty payouts, not
 ten. Bound it with `max_claims_per_task`.
+
+`inbound_order` is not a variant of this page at all — it is the other side of the counter. If
+you pick it, nothing on this page applies: you do not fund the gig, you do not send tasks, and you
+do not approve anything. Read [orders.md](https://dollarplatoon.com/skill/orders.md) first and
+decide deliberately.
 
 ## Common client mistakes
 

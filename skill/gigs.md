@@ -58,7 +58,7 @@ POST /gigs
   "requires_approval": false,
   "review_timeout": 172800,              // seconds before an unreviewed proof auto-approves
   "task_timeout": 86400,                 // seconds a worker may hold a task; null = never expires
-  "distribution": "queue",               // see tasks.md for all seven modes
+  "distribution": "queue",               // see tasks.md for all eight modes
   "queue_order": "fifo",                 // queue modes only: fifo | lifo | priority | random
   "max_claims_per_task": 3,              // queue_solo only; null = unlimited
   "default_task_tags": ["shortform"],    // stamped on tasks that arrive untagged
@@ -66,9 +66,7 @@ POST /gigs
   "default_rate_limit_minutes": 60,
   "default_max_open_tasks": 3,           // tasks one worker may hold unproven; null = unlimited
   "allow_price_offers": false,           // let workers quote their own price per proof
-  "min_rep_volume": null,
-  "min_rep_quality": null,
-  "min_rep_recency": null,
+  "task_escrow": false,                  // fund each task on chain as it is created — see tasks.md
   "min_payout": 0,
   "location": { "country": "US", "label": "United States" },
   "icon_url": "https://...",
@@ -92,6 +90,13 @@ POST /gigs
 
 Creation runs a compliance check that blocks illegal content and warns on borderline content.
 
+**`distribution: "inbound_order"` takes a different body.** Omit `price` — it is pinned to 0 —
+and send `list_price` instead (minimum $0.02). `review_timeout` must be a positive number of at
+least 3600 seconds; `-1` is refused. `price_tbd`, `allow_price_offers`, a non-null `task_timeout`
+and a non-zero `min_payout` are all rejected at the door rather than quietly ignored. The response
+adds `vendor_mailbox_id` — your own mailbox in your own shop, because there you are the worker
+too. See [orders.md](https://dollarplatoon.com/skill/orders.md).
+
 Tags are arbitrary — there is no whitelist. Use them to group gigs by campaign, client, or batch,
 then filter with `GET /gigs/mine?tag=q3` (case-insensitive substring, comma-separated values
 OR'd).
@@ -111,6 +116,15 @@ can actually pay.
 `allow_price_offers` lets a worker send `asking_price` with a proof. The ask is a quote: it never
 becomes the payout unless you approve at that amount, and a review that times out still pays the
 gig price. See [proofs.md](https://dollarplatoon.com/skill/proofs.md).
+
+**An order machine adds three fields to `GET /gigs/:id` and moves one on PATCH.**
+`list_price` is public — a buyer is entitled to see the sticker before joining. `fee_bps` is the
+live Treasury rate, present even when its value is `null`, which means *"could not be read"* and
+must never be replaced with a constant. `escrowed_funds` goes to the owner and members only, and
+is how much of `available_funds` is customers' escrow rather than the vendor's takings; `null`
+there means "not synced", not "zero". On PATCH, `list_price` moves and `price` answers `409` —
+along with `distribution`, `contract_address`, `min_payout`, `task_timeout` and a `review_timeout`
+of `-1`.
 
 ## Invite links
 
@@ -140,6 +154,25 @@ anyone who guesses a gig id from injecting tasks.
 - Email: `{gig_id}_{token}.dollar-platoon@fwd.zoomgtm.com`
 - Webhook: `/inbound/webhook/{gig_id}?token={token}`
 - Requests without a valid token get `403`.
+
+### Who can read it
+
+The token is a **write credential** — whoever holds it can post tasks into the gig — so
+`GET /gigs/:id` only puts it on the `webhook` URL for callers entitled to use that door:
+
+| Caller | Gets `?token=` on `webhook` |
+|---|---|
+| The gig owner | Yes, on every gig |
+| A member of an `inbound_order` gig | Yes — placing an order **is** posting to this webhook |
+| A member of any other gig | **No.** A worker is not a publisher |
+| Anyone else, signed in or not | No |
+
+The `webhook` field itself always comes back, minus the token, so the shape of the response does
+not change for a reader who is not entitled to the secret. Read it once as the owner and store
+it; a publisher app is not expected to re-fetch it per request.
+
+On a **`task_escrow`** gig the token is stronger than a write credential — creating a task
+deposits the owner's USDC on chain — which is why a worker never sees it there.
 
 ```json
 POST /gigs/:id/rotate-token
@@ -227,6 +260,12 @@ POST /gigs/:id/deposit   { "wallet_alias_id": "...", "amount": 100 }
 Moves USDC from your hot wallet into the gig's on-chain balance. Budget **110%** of expected
 payouts — the fee is charged on top. Funds are locked once deposited; there is no withdrawal.
 
+**On an order machine this route answers `409`, and correctly.** An order machine is not funded
+by its owner: each order is funded by the participant who places it, against a deposit that names
+it. Money in the shared pot there would be unreachable — the deposit-naming payout can only spend
+deposits it names, and the Treasury's reserved-balance guard refuses the legacy payout the float
+would need. It would be money the vendor could never get out.
+
 ## The dashboard
 
 ```json
@@ -272,8 +311,10 @@ POST /gigs/:id/mailboxes
 → { "mailbox": { "id": "MBX_01HX...", "status": "active" } }   // or "pending_approval"
 ```
 
-Reputation thresholds are checked here. An invite gig rejects a join without a valid token
-(`403`); an email-bound invite must match your account email and skips owner approval.
+The invite is the gate. An invite gig rejects a join without a valid token (`403`); an
+email-bound invite must match your account email and skips owner approval. There are no
+reputation thresholds — `min_rep_volume`, `min_rep_quality` and `min_rep_recency` were removed,
+and a gig that still carries them is not gated by them.
 
 If the gig sets `join_webhook_url`, each successful join fires a fire-and-forget POST:
 
@@ -300,12 +341,13 @@ Changing `wallet_address`:
 
 - Must be a valid EVM address. It is registered to your account automatically; an address already
   registered to a **different** account is rejected with `409`, because wallets stay 1:1 with
-  users so reputation cannot be hijacked.
+  users so nobody can claim somebody else's settlement history.
 - Takes effect for **future rollups only**. A rollup that already exists — including one still
   retrying after a failure — pays to the address snapshotted when it was created.
-- Reputation survives. Events accrue per wallet, but join thresholds and profile reputation merge
-  events across **all** wallets on your account, so rotating payout addresses never resets your
-  history.
+- Your history survives, but it does not follow you automatically. Events accrue **per wallet**,
+  and `GET /reputation/:wallet/events` reads one address at a time — so after rotating a payout
+  address, anyone reading your record has to read both. Nothing is lost; it is simply in two
+  places. See [payouts.md](https://dollarplatoon.com/skill/payouts.md).
 
 ## List your mailboxes
 

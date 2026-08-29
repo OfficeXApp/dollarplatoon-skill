@@ -17,7 +17,7 @@ Read this once. Everything here applies to every endpoint in the rest of the ski
 ## Get an API key
 
 Sign in at [dollarplatoon.com](https://dollarplatoon.com), then open
-[Settings](https://dollarplatoon.com/client/settings) and copy the key.
+[Settings](https://dollarplatoon.com/settings) and copy the key.
 
 ```bash
 DOLLAR_PLATOON_API_KEY="your_api_key_here"
@@ -44,7 +44,9 @@ curl -H "x-api-key: $DOLLAR_PLATOON_API_KEY" https://dollarplatoon.com/api/auth/
 ```
 
 Staging is the same API at `https://staging.dollarplatoon.com/api`, with its own accounts and
-its own testnet USDC. Use it for anything you would not want to pay for.
+its own testnet USDC on Base Sepolia. Use it for anything you would not want to pay for. Every
+path in this skill is identical there; substitute the host.
+See [staging.md](https://dollarplatoon.com/skill/staging.md).
 
 ## Identifier format
 
@@ -66,8 +68,10 @@ Every id is a `PREFIX_` followed by a ULID, so an id tells you what it points at
 **Treat ids as opaque strings.** Do not parse them and never construct one — always pass back the
 id the API gave you.
 
-Two things deliberately break the pattern: your **API key** is a credential, and **invite tokens**
-are short random strings.
+Three things deliberately break the pattern: your **API key** is a credential, **invite tokens**
+are short random strings, and a **`deposit_id`** on an order machine is a raw 32-byte hex value,
+because it is an on-chain key rather than a row id. Do not try to prefix it, and do not sort a
+list by it — see [orders.md](https://dollarplatoon.com/skill/orders.md).
 
 Ids issued before this scheme existed were bare ULIDs with no prefix. They still resolve
 everywhere, so an old share link, a bookmarked task id, or a stored webhook payload keeps
@@ -115,9 +119,17 @@ because the partition is narrow — and it is why page size is not the same as r
 Error bodies are always `{ "error": "human readable reason" }`, sometimes with extra fields such
 as `reason`, `rate_limit`, or `existing_proof_id`.
 
-**One gotcha worth knowing.** The site's CDN rewrites API `403` and `404` responses into a `200`
-serving the web app's HTML. If you get a `200` whose `content-type` is `text/html`, the API
-actually refused the request — check the header before parsing the body as JSON.
+**`409` with `reason: "inbound_order"` is a documented answer, not a bug.** On an order machine
+roughly twenty owner-only operations are closed, and each one refuses in that exact shape with a
+sentence saying what to do instead. The caller's credentials are fine; the operation is wrong for
+the mode. The whole list is in [orders.md](https://dollarplatoon.com/skill/orders.md).
+
+**A gotcha that used to be true, on both stages.** The CDN once rewrote API `403` and `404`
+responses into a `200` serving the web app's HTML, so a refusal read as a success. That is
+**fixed**: the SPA fallback now happens on the way *in* and `/api/*` never reaches it, so an API
+error arrives as itself with `content-type: application/json`. Nothing in this skill asks you to
+sniff the header any more. Older integrations that check for it are harmless; new ones do not
+need to.
 
 ## Rate limits
 

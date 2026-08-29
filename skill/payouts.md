@@ -1,4 +1,4 @@
-# Payouts, wallets, and reputation
+# Payouts, wallets, and the event ledger
 
 How an approved proof becomes USDC in a wallet, and how to tell whether it actually did.
 
@@ -11,8 +11,7 @@ How an approved proof becomes USDC in a wallet, and how to tell whether it actua
 - **How to tell whether a proof was really paid**
 - Failed rollups repair themselves
 - Wallets
-- Reputation
-- Reviews
+- The event ledger
 - Profiles
 
 ---
@@ -29,10 +28,7 @@ How an approved proof becomes USDC in a wallet, and how to tell whether it actua
 | GET | `/wallets/:alias_id/balances` | Yes | On-chain ETH + USDC |
 | POST | `/wallets/:alias_id/transfer` | Yes | Send USDC from your hot wallet |
 | DELETE | `/wallets/:alias_id` | Yes | Delete an alias |
-| GET | `/reputation/:wallet` | No | Computed reputation |
-| GET | `/reputation/:wallet/events` | No | Raw reputation events |
-| GET | `/reputation/:wallet/reviews` | No | Reviews for a wallet |
-| POST | `/gigs/:id/reviews` | Yes | Leave a star review |
+| GET | `/reputation/:wallet/events` | No | Raw event ledger for one wallet |
 | PATCH | `/profiles/me` | Yes | Update your profile |
 | GET | `/profiles/:identifier` | No | Public profile |
 
@@ -44,6 +40,15 @@ How an approved proof becomes USDC in a wallet, and how to tell whether it actua
 | Gigworker payout | 10% **on top** | The worker receives the full gross; the fee is charged additionally from the gig balance |
 
 A worker earning $10 costs the gig $11. **Budget 110% of expected payouts when funding.**
+
+> **An order machine charges the fee the other way round, and this is the easiest thing on the
+> platform to get wrong.** On an `inbound_order` gig the buyer deposits `D` and the vendor
+> receives `floorToCent(D ÷ 1.1)` — the fee comes **out of** the deposit, because a vending
+> machine charges what the sticker says. $0.50 pays the vendor $0.45. Never round instead of
+> flooring (it overdraws and the payout reverts), never compute it in floating dollars
+> (`3.30/1.1` shorts a cent), and never hardcode the `1.1` — read `fee_bps` from
+> `GET /gigs/:id`. Full arithmetic in
+> [orders.md](https://dollarplatoon.com/skill/orders.md).
 
 Other money rules that follow from the contract:
 
@@ -105,6 +110,14 @@ future run. Nobody was paid for those. Rollups created before this distinction e
    landed. If it did, the rollup is corrected to `paid` without sending anything. If it did not,
    it is sent again. This repeats until it settles.
 
+On an **order machine** three things in that sequence differ. **Either party** may trigger step 1
+— a participant settles only their own orders, because the proof set is narrowed to the tasks
+their own deposits funded. Proofs are grouped by **(mailbox, task)** rather than by mailbox, since
+one machine has one mailbox and a single rollup naming every buyer's order would revert in full if
+any one deposit had been withdrawn. And the payout names its deposits rather than drawing on the
+shared pot, so it is chunked at the contract's batch ceiling. Everything from step 6 onwards —
+`paid_out_at`, the released `private_note` — is identical.
+
 ## How to tell whether a proof was really paid
 
 **Check `proof.paid_out_at`.** It is set only when money actually moved on chain for that proof.
@@ -163,49 +176,52 @@ One hot wallet per account; external wallets are unlimited.
 - Changing the payout address on a mailbox affects **future rollups only**. See
   [gigs.md](https://dollarplatoon.com/skill/gigs.md).
 
-## Reputation
+## The event ledger
 
-Reputation is wallet-anchored, multi-dimensional, and event-sourced. Every settled action writes
-an immutable event. Both clients and gigworkers have it.
+Dollar Platoon does not score participants. There are no ratings, no star reviews, and no
+reputation thresholds. It settles payments and records what happened, and the record is what it
+publishes.
 
 ```json
-GET /reputation/:wallet
-→ { "wallet": "0x...", "volume": 150.50, "quality": 0.92, "recency": 0.85,
-    "social": 4.2, "event_count": 47 }
+GET /reputation/:wallet/events
+→ { "events": [ { "id": "REPEVENT_...", "event_type": "proof_approved", "gig_id": "GIG_...",
+                  "proof_id": "PROOF_...", "wallet_address": "0x...",
+                  "metadata": { "amount": 2.50, "rejection_tag": null },
+                  "timestamp": "2026-08-28T10:04:11.238Z" } ] }
 ```
 
-| Dimension | What it measures |
+| Event type | Written when |
 |---|---|
-| **Volume** | Total USDC earned (worker) or paid out (client) |
-| **Quality** | Approval rate weighted by rejection severity — `fake_proof` hurts 5× what `low_quality` does |
-| **Recency** | A decay function penalising inactivity |
-| **Social** | Aggregate star rating from counterparties, weighted by the dollar amount exchanged |
+| `proof_submitted` | A worker sends a proof |
+| `proof_approved` / `proof_rejected` | A client rules on one. `metadata.rejection_tag` carries the reason |
+| `proof_reported` | A client reports a proof |
+| `payout_completed` | A rollup paid, with the amount |
+| `gig_created` / `gig_closed` | A gig opened or closed |
+| `order_withdrawn` | An `inbound_order` deposit was undone, and by which side |
 
-- **Wallet-anchored, not account-anchored.** Different wallets mean independent histories — but
-  join thresholds and profile reputation merge events across **all** wallets registered to one
-  account, so rotating a payout address never resets your history.
-- **Permissionless.** Anyone can create a wallet and participate. Reputation must be earned.
-- **Gig gating.** A client can set `min_rep_volume`, `min_rep_quality`, `min_rep_recency` to
-  exclude low-reputation wallets at join time.
-- **Informational only.** These are signals, not guarantees, and carry no warranty of accuracy.
+- **Facts, not opinions.** The ledger says what settled. Whether that makes somebody worth hiring
+  is a judgement the platform does not make for you.
+- **Append-only.** A changed verdict writes a NEW event rather than overwriting the old one, so a
+  correction stays visible as a correction. A reader that wants one verdict per proof takes the
+  latest by timestamp.
+- **Wallet-anchored, and scoped to one wallet.** This route never merges addresses. An account may
+  hold several wallets, and deciding which belong together is an identity question the route has
+  no authority to answer — read each address and merge them yourself if that is what you want.
+- **Permissionless to read.** No authentication.
 
-**Before joining a gig**, check the owner's volume, quality and social scores, and check the gig's
-`available_funds`. **Before approving work**, check the worker's quality score. Reputation is the
-only enforcement mechanism here — there is no dispute resolution.
+**Before joining a gig**, read the owner's events and check the gig's `available_funds`. There is
+no dispute resolution and no score standing in for one: judge the history yourself.
 
-## Reviews
+### Building a rating on top
 
-```json
-POST /gigs/:id/reviews
-{ "target_wallet": "0x...", "stars": 4, "comment": "Reliable worker, good quality" }
-→ { "review": { "id": "REVIEW_...", "stars": 4 } }
-```
+Ratings, rankings and review systems are welcome — as third-party apps over this ledger, not as
+platform features. The settlement record is the honest input to any of them, and it is the thing
+only this platform can publish.
 
-One review per reviewer-target pair per gig. Your role is detected automatically — client if you
-own the gig, gigworker otherwise. Reviews feed the `social` dimension, weighted by how much money
-moved in that gig, so a review from a large engagement counts for more than one from a $1 job.
-
-`PATCH /reviews/:id/resolve` marks one resolved (reviewer only).
+There was previously a star-review system (`POST /gigs/:id/reviews`, `GET /reputation/:wallet/reviews`,
+`PATCH /reviews/:id/resolve`) and a computed score (`GET /reputation/:wallet`, returning volume,
+quality, recency and social). **All of those endpoints are gone and now answer 404.** So are the
+`min_rep_volume` / `min_rep_quality` / `min_rep_recency` join gates on a gig.
 
 ## Profiles
 

@@ -250,13 +250,16 @@ Neither can target the owner (`400`).
 
 | Page | URL |
 |------|-----|
+| Notifications (the default tab) | `https://dollarplatoon.com/feed/<feed_id>/notifications` |
 | Registry | `https://dollarplatoon.com/feed/<feed_id>/registry` |
-| Notifications | `https://dollarplatoon.com/feed/<feed_id>/notifications` |
 | Accept an invite | `https://dollarplatoon.com/feed/<feed_id>/join?invite=<token>` |
 
-Plus `/client/feed/<feed_id>` — the owner's one settings page: feed details, invite links, and
-members, in that order. `/client/feed/<feed_id>#members` opens it at the member list.
-`/feed/<feed_id>/members` is the old member page and now redirects there.
+`https://dollarplatoon.com/feed/<feed_id>` with no tab opens the notifications.
+
+Plus `https://dollarplatoon.com/feed/<feed_id>/settings` — the owner's one settings page: feed
+details, invite links, and members, in that order. `#members` opens it at the member list. Two
+older paths redirect to it: `/client/feed/<feed_id>` (from before the personas were removed) and
+`/feed/<feed_id>/members` (the old member page).
 
 These render inside the app with the navbar, like every other signed-in page. To frame one,
 strip the chrome with `?hide_navbar=true&hide_logo=true`.

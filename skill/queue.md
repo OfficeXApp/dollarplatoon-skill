@@ -380,8 +380,8 @@ application task and invites the next applicant to apply for a job you have alre
 
 This is the counter-intuitive step, and it matters twice over:
 
-- `not_selected` is excluded from reputation scoring entirely, so nobody is penalised for applying
-  and losing. Any other tag **would** cost them.
+- `not_selected` says "did not get the job", not "did bad work", so a losing applicant's ledger
+  reads honestly. Any other tag would put a quality complaint on their record.
 - **Rejected `$0` proofs get cleared by a rollup. Approved `$0` proofs never do.** A payout run
   skips any mailbox whose approved total is `$0`, so those rows are rescanned forever and grow
   without bound. Approving applications is the trap; rejecting them is the clean path.
