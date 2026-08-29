@@ -11,6 +11,7 @@ here in both halves.
 - Routes
 - Open a shop — the vendor's side
 - `list_price`, and why `gig.price` is pinned to 0
+- Free shops (`list_price: 0`)
 - Fee-INCLUSIVE pricing: what the deposit actually buys
 - The order lifecycle
 - Place an order — the participant's side, end to end
@@ -137,9 +138,63 @@ settled on chain, `paid_out_at` is never stamped, the withheld deliverable is ne
 and the undo is already closed by the approval. The buyer pays, the vendor works, and the escrow
 is stranded with no exit. $0.02 is the smallest deposit that leaves the vendor $0.01.
 
+**`list_price: 0` is the one value below that floor which is allowed, and it is a different shop
+rather than a cheaper one.** See [Free shops](#free-shops-list_price-0). Anything strictly between
+`0` and `$0.02` is refused.
+
 `PATCH /gigs/:id` moves `list_price` and refuses `price` (`409`, `reason: "inbound_order"`).
 Repricing the shop **does not touch orders already funded** — their amounts were fixed by the
-money that was actually sent, and are bounded on chain by it.
+money that was actually sent, and are bounded on chain by it. A PATCH that would cross the
+free/paid line in either direction is refused with `409 list_price_mode_change`.
+
+## Free shops (`list_price: 0`)
+
+A free order machine takes orders and **touches no contract at all**. No deposit, no Treasury, no
+`DEPOSIT_ID_SECRET`, no gas, and the buyer needs no wallet.
+
+That is the point of it rather than a side effect: a paid shop needs a Treasury carrying the
+escrow surface, and a deployment whose Treasury has been drained cannot run one. A free shop runs
+anywhere.
+
+Everything the trap above describes is a property of escrow. A free order has no deposit, so
+there is no escrow to strand, no rollup to settle, no `paid_out_at` to lose and no undo to close.
+
+**Open one** exactly as above, with `list_price: 0`.
+
+**Place an order** with the same two calls as a paid one — draft through the webhook, then
+`POST /gigs/:id/tasks/:msgId/publish` — with **no body**. An `amount` other than `0` is refused
+(`409`, `reason: "free_order"`), never silently dropped, so a buyer is never told they tipped when
+they did not. The response carries `free: true`, `price: 0`, and no `deposit_id` or `tx_hash`.
+
+What changes downstream:
+
+| | Paid shop | Free shop |
+|---|---|---|
+| Marker on the sent order | `deposit_id` | `order_free: true` |
+| Ledger row `state` | `pending` → `open` → `settled` | `free` (terminal) |
+| Releases the withheld `private_note` | `paid_out_at`, after the payout | the buyer's **approval** |
+| Rollups | one per settled order | none, ever (`409 free_order`) |
+| Approval | revisable until a rollup carries it | **final** (`409 free_order_approved`) |
+| Undo | returns the deposit on chain | closes the order, returns nothing |
+| Closing the shop | refused (`409 inbound_order`) | allowed |
+
+The approval being final is the one asymmetry worth reading twice. On a paid order the payout
+stamp is what closes the verdict; a free order never gets one, and approval is what *releases the
+deliverable* — so if approval stayed revisable, a buyer could read a withheld licence key and then
+withdraw the verdict that unlocked it, repeatedly. Rejections stay revisable in both modes,
+because a rejection releases nothing.
+
+A free cancel writes **no reputation event**. Those are keyed on the depositor's wallet address,
+and a free order has no depositor.
+
+**A free shop can be closed** — `PATCH /gigs/:id {"status":"closed"}`, or `DELETE /gigs/:id`,
+which writes the same field. A **paid** shop still refuses both (`409`), because closing takes a
+gig out of `scanActiveGigs()` and therefore out of the cron payout sweep — the backstop that pays
+a vendor whose buyer never pressed the button. A free shop has no sweep to leave.
+
+Closing stops **new** orders only (`409`, "This shop is not open"). Orders already in flight run to
+their end: auto-approval is a query over proof rows and never reads a gig, and delivery, the
+verdict and the undo have no gig-status check either. Reopen with `{"status":"active"}`.
 
 ## Fee-INCLUSIVE pricing: what the deposit actually buys
 

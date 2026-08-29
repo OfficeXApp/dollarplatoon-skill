@@ -91,7 +91,9 @@ POST /gigs
 Creation runs a compliance check that blocks illegal content and warns on borderline content.
 
 **`distribution: "inbound_order"` takes a different body.** Omit `price` — it is pinned to 0 —
-and send `list_price` instead (minimum $0.02). `review_timeout` must be a positive number of at
+and send `list_price` instead: either `0` for a **free shop**, which sends no deposit and needs no
+Treasury, or at least `$0.02` for a paid one. Anything strictly between the two is refused, and a
+shop cannot cross that line later. `review_timeout` must be a positive number of at
 least 3600 seconds; `-1` is refused. `price_tbd`, `allow_price_offers`, a non-null `task_timeout`
 and a non-zero `min_payout` are all rejected at the door rather than quietly ignored. The response
 adds `vendor_mailbox_id` — your own mailbox in your own shop, because there you are the worker
