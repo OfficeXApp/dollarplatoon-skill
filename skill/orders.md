@@ -21,6 +21,8 @@ here in both halves.
 - `private_note` is the vendor's only protection
 - Approve, then settle, then reveal
 - Report and comments both work in both directions
+- Talk about an order BEFORE it is paid for
+- Webhooks: run the shop without polling
 - What this mode refuses, and why a `409` is an answer
 - Fields you will see on an order
 - What is still missing
@@ -70,7 +72,9 @@ already know that **change hands** in this mode.
 | GET | `/gigs/:id` | Optional | Adds `list_price`, `fee_bps`, and `escrowed_funds` (owner + members) |
 | PATCH | `/gigs/:id` | Vendor | `list_price` moves; `price` does not |
 | POST | `/inbound/webhook/:gig_id?token=…&draft=true` | Token **+ participant session** | Save a draft order |
-| GET | `/gigs/:id/drafts` | Vendor **or participant** | Your own unsent orders |
+| GET | `/gigs/:id/drafts` | Vendor **or participant** | The vendor sees every unsent order; a buyer sees only their own |
+| PATCH | `/gigs/:id/tasks/:msgId/comments-policy` | **Participant**, on a draft | Who reads this order. `public` mints a link |
+| GET | `/public/order?gig=&task=&token=` | **None** | One shared order and its thread, read-only |
 | PATCH | `/gigs/:id/tasks/:msgId/payload` | **Participant** | Rewrite an unfunded draft's body |
 | PATCH | `/gigs/:id/tasks/:msgId/private-details` | **Participant** | The private half of the brief |
 | POST | `/gigs/:id/tasks/:msgId/publish` | **Participant** | **Deposit and send.** `{ amount, wallet_alias_id }` |
@@ -336,7 +340,9 @@ outright (`403`) and refuse everybody once the draft is funded (`409`): at that 
 
 ```json
 POST /gigs/:id/tasks/:msgId/publish
-{ "amount": 0.50, "wallet_alias_id": "..." }
+{ "amount": 0.50, "wallet_alias_id": "...",
+  "order_webhook_url": "https://my-app.example.com/callback",  // optional, per order
+  "order_webhook_secret": "a-key-i-chose" }                    // optional, signs it
 
 → { "status": "assigned", "message_id": "TASK_01KX...", "published": true,
     "deposit_id": "0x…", "tx_hash": "0x…",
@@ -349,8 +355,12 @@ the price written on the delivered task is derived from the money that just move
 there would be a window where the vendor holds a claimable task that nothing funds — priced, by
 every fallback in the codebase, at `gig.price`, which is 0.
 
-Delivery mints a **new task id**. `message_id` is the live order; `draft_id` was the draft, and it
-is deleted. Use `message_id` from here on.
+The order **keeps the id it was drafted under**. `message_id` and `draft_id` are the same value,
+and it is the id the deposit was derived from — so the money, the draft and the delivered order
+are one identity from the moment the order is saved. The draft row is not deleted; it becomes the
+order.
+
+Publishing an order that is already published answers `409`, not `404`, and names the id.
 
 **4. Watch it.** `GET /orders` is your ledger. `GET /gigs/:id/proofs` shows the delivery when it
 arrives.
@@ -581,6 +591,162 @@ work the same way. Read the role note at the top of this page before you render 
 buyer's comments are stored `client` and the vendor's are stored `gigworker`, which is the
 inverse of what "owns the gig" would tell you.
 
+## Talk about an order BEFORE it is paid for
+
+A draft order is a real row with a real task id, and both sides of the sale can read it and talk
+on it from the moment it is saved. This is where a sale is actually made: "can you do fifty of
+these by Friday", "yes, but the third one will cost more", and then the buyer edits the order and
+pays for it. Nothing is committed until they do.
+
+| Who | Sees a draft order | May write on it |
+|---|---|---|
+| The buyer who wrote it | yes — `GET /gigs/:id/drafts` lists their own | yes |
+| The vendor | yes — `GET /gigs/:id/drafts` lists **every** order in their shop | yes |
+| Another buyer in the same shop | **no**, ever | no |
+| Anybody holding a public link | yes, if the buyer made one | no — read only |
+
+Both sides are notified of the other's comments, including a vendor's opening message. Because
+the order keeps its id when it is paid for, the whole conversation is still there afterwards.
+
+### The buyer decides who reads their own order
+
+`PATCH /gigs/:id/tasks/:msgId/comments-policy` is the gig owner's call on a published task. On an
+**unpublished order it belongs to the buyer who wrote it** — it is their order until they send
+it — and the vendor gets `403 { "reason": "not_draft_writer" }`.
+
+```json
+PATCH /gigs/GIG_abc/tasks/TASK_01KV.../comments-policy
+{ "policy": "public" }
+
+→ { "success": true, "policy": "public", "public_link": true,
+    "public_token": "SHARE_01M..." }
+```
+
+`public` on a draft order does **not** open it to the other customers. It mints a link:
+
+```
+https://dollarplatoon.com/fund/GIG_abc/TASK_01KV...?t=SHARE_01M...
+```
+
+Anybody holding that URL reads the order and the whole conversation with **no account at all**.
+They cannot reply unless they sign in and join the shop.
+
+- The token is returned **once**, by the call that mints it. A later task read reports
+  `public_link: true` and hands back no credential — except to the buyer themselves, who gets
+  `public_token` on their own draft so the link can be shown again.
+- **The task id alone is not enough.** Ids travel in webhooks and publish responses, so the
+  public read demands the token as well.
+- Setting any other policy **deletes the token in the same write**, and every copy of the link
+  already sent stops working. That is the only revocation a shared link can have.
+
+### Reading one without an account
+
+```
+GET /public/order?gig=GIG_abc&task=TASK_01KV...&token=SHARE_01M...
+
+→ { "gig_title": "...", "order": { "id": "...", "subject": "...", "payload": "...",
+    "draft": true, "forwarded_at": "..." },
+    "comments": [ ... ], "can_post": false }
+```
+
+One `404` covers a wrong token, a missing order and a policy that is not `public` — separating
+them would confirm which orders exist. It never carries `private_details`, an email address, the
+deposit, or the token. The link keeps working after the order is paid for, because the policy
+does.
+
+## Webhooks: run the shop without polling
+
+Both sides of an order machine can be driven by events. Full field-by-field reference, including
+the signature scheme, is in [gigs.md](https://dollarplatoon.com/skill/gigs.md); this section is
+the order-specific half.
+
+**The direction rule.** `proof_webhook_url` on the gig belongs to the **gig owner**, who here is
+the vendor. It is the wrong channel for a buyer, and pointing it at one would tell a seller about
+their own delivery. The buyer's channel is on the **order**, and the vendor's is on their
+**mailbox**.
+
+### Vendor: be told when an order arrives
+
+Opening a shop creates your own mailbox (`vendor_mailbox_id` in the create response) with no
+webhook on it. One PATCH turns the shop on:
+
+```bash
+curl -X PATCH "https://dollarplatoon.com/api/gigs/$GIG_ID/mailboxes/$VENDOR_MAILBOX_ID" \
+  -H "x-api-key: $VENDOR_KEY" -H "Content-Type: application/json" \
+  -d '{ "webhook": "https://my-shop.example.com/orders",
+        "events_webhook_url": "https://my-shop.example.com/order-events" }'
+→ { "success": true, "webhook_secret": "whsec_..." }
+```
+
+Every funded order now POSTs to `/orders` as `task.assigned`, carrying `message_id` — the order
+you deliver a proof against. Verdicts (`proof.approved`, `proof.rejected`), payouts
+(`payout.paid`) and cancellations (`order.withdrawn`) arrive on `/order-events`.
+
+### Buyer: be told what happens to your order
+
+Name a callback in the **publish** call — the one that funds the order. It is per order, because
+you may hold more than one mailbox in a shop and "your webhook" would otherwise be ambiguous.
+
+```bash
+curl -X POST "https://dollarplatoon.com/api/gigs/$GIG_ID/tasks/$DRAFT_ID/publish" \
+  -H "x-api-key: $BUYER_KEY" -H "Content-Type: application/json" \
+  -d '{ "amount": 5.00,
+        "order_webhook_url": "https://my-app.example.com/orders/callback",
+        "order_webhook_secret": "a-key-i-chose" }'
+```
+
+`order_webhook_secret` is **yours to pick**, unlike every other secret on the platform, and it
+signs every `order.*` event for this order. Omit it and the deliveries go out unsigned. Both
+fields work identically on a free shop.
+
+### The `order.*` payloads
+
+`order.delivered` — the vendor submitted work. Review it, or let the clock do it for you.
+
+```json
+{ "event": "order.delivered", "sent_at": "...", "gig_id": "GIG_01HX...",
+  "gig_title": "Thumbnail shop", "task_id": "MSG_01HX...", "proof_id": "PRF_01HX...",
+  "price": 4.54, "deliverable_locked": true, "resubmitted": false }
+```
+
+`deliverable_locked: true` means the vendor withheld the file itself in `private_note`.
+Approving does **not** open it on a paid shop — payment does. Wait for `order.paid_out`.
+
+`order.auto_approved` — your review window ran out and the clock ruled for the vendor.
+
+```json
+{ "event": "order.auto_approved", "sent_at": "...", "gig_id": "GIG_01HX...",
+  "task_id": "MSG_01HX...", "proof_id": "PRF_01HX...", "price": 4.54, "reportable": true }
+```
+
+`reportable: true` is your remedy, and it is the only event that carries it: `POST
+/gigs/:id/proofs/:proof_id/report` takes the delivery out of the payable set — but only until a
+rollup carries it.
+
+`order.paid_out` — the vendor was paid, and a withheld deliverable is now readable.
+
+```json
+{ "event": "order.paid_out", "sent_at": "...", "gig_id": "GIG_01HX...",
+  "task_id": "MSG_01HX...", "proof_id": "PRF_01HX...", "paid_to_vendor": 4.54,
+  "tx_hash": "0x...", "deliverable_unlocked": true }
+```
+
+On `deliverable_unlocked: true`, fetch `GET /gigs/:id/proofs/:proof_id` to read the note. A free
+shop never sends this event — nothing settles, and approval is what releases the note there.
+
+`order.withdrawn` — the order was cancelled and the money went back. **The one event both sides
+receive.** Read `withdrawn_by` before you react, or you will handle your own cancellation as if
+the other party had sent it.
+
+```json
+{ "event": "order.withdrawn", "sent_at": "...", "gig_id": "GIG_01HX...",
+  "task_id": "MSG_01HX...", "withdrawn_by": "participant", "withdrawn_at": "..." }
+```
+
+`withdrawn_by` is `"participant"` (the buyer cancelled), `"vendor"` (the shop declined the job),
+or `"reconciler"` (a publish that never completed, cleaned up by the cron). The vendor's copy
+also carries `mailbox_id`.
+
 ## What this mode refuses, and why a `409` is an answer
 
 Roughly twenty owner-only levers are closed on an order machine. Every one of them answers
@@ -626,6 +792,10 @@ order's value is not readable by everyone who joined.
 | `is_my_order` | Answers the same question without guessing. |
 | `accepted_at` | When the vendor took delivery. There is no claim step in this mode. |
 | `order_withdrawn_at` | Set on an undone order. Absent everywhere else. |
+
+`order_webhook_url` and `order_webhook_secret` are **write-only**. They are stored on the order
+and no route ever reads them back — not to the vendor, and not to the buyer who set them. Keep
+your own record of what you registered.
 
 On `GET /orders`, `state` is one of `pending | open | settled | withdrawn`, `vendor_payout` is
 derived from the deposit's own `fee_bps`, and `tip_estimate` is explicitly nullable and

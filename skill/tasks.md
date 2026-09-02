@@ -151,12 +151,20 @@ Publishing runs the ordinary delivery path, so the answer is the ordinary one �
 `assigned` or `forwarded` — plus `draft_id` and `published: true`:
 
 ```json
-→ { "status": "queued", "message_id": "TASK_01KW...", "priority": 1000,
+→ { "status": "queued", "message_id": "TASK_01KV...", "priority": 1000,
     "draft_id": "TASK_01KV...", "published": true }
 ```
 
-**The task gets a new id when it publishes.** Address the published task by the id in
-`message_id`/`message_ids`, not by the draft id.
+**The task keeps the draft's id.** `message_id` and `draft_id` are the same value, so a link, a
+comment thread or a note you made against the draft still names the task after it is sent. The
+draft row is not deleted — it *becomes* the task.
+
+Two consequences:
+
+- Publishing the same draft twice answers `409 That task is already published`, and names the
+  id. It does not answer `404`.
+- On a `free_for_all` gig one task is written per matching worker. The **first** row keeps the
+  draft's id; the others are new tasks with new ids. Always read `message_ids` there.
 
 If nobody matched the task, it is **not** published and the draft is kept:
 
@@ -371,6 +379,20 @@ keep their place. A caller who has not joined the gig gets
 
 Every comment that needs an answer writes a notification: see
 [web-pages.md](https://dollarplatoon.com/skill/web-pages.md).
+
+### Comments on a draft
+
+A draft takes comments, and it keeps them. Because the task keeps its id when it publishes, a
+thread started on a draft *is* the thread that carries on afterwards.
+
+**On an outbound gig** the comment routes accept an unpublished task id from the gig owner and
+answer `404` to everybody else. Nothing notifies — nobody else can read the task. The moment you
+publish, the thread follows the task's `comments_policy` like any other, so under `public` every
+member reads it and under `private` a root comment you wrote is a prompt every member can read.
+Do not use a draft comment as a private note; use `private_details` for that.
+
+**On an order shop** it is a conversation between the two sides of the sale, and it works before
+any money moves. See [orders.md](https://dollarplatoon.com/skill/orders.md).
 
 ## Payload format: JSON or HTML
 

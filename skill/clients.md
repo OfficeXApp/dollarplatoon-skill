@@ -169,7 +169,19 @@ PATCH /gigs/:id/proofs/:proof_id
   `"resubmitted": true`, and your review window restarts from that moment. Reviewing a proof ends
   this — once you have approved or rejected, the verdict is yours alone.
 - Automate it by setting `proof_webhook_url` on the gig and routing submissions to your own
-  validator or agent.
+  validator or agent:
+
+```bash
+curl -X PATCH "https://dollarplatoon.com/api/gigs/$GIG_ID" \
+  -H "x-api-key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{ "proof_webhook_url": "https://my-validator.example.com/proofs" }'
+→ { "success": true, "webhook_secret": "whsec_..." }   // returned when the gig had none
+```
+
+  Each submission POSTs `{ gig_id, proof_id, task_identifier, locked_price, private_note_locked }`,
+  signed with `X-DollarPlatoon-Signature`. Verify it before acting — the snippet, the header
+  format and every other event are in [gigs.md](https://dollarplatoon.com/skill/gigs.md). Read
+  the secret back at any time with `GET /gigs/:id`, which shows it to the owner only.
 
 ## Step 6 — pay out
 
