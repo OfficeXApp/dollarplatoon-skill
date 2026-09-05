@@ -379,6 +379,23 @@ https://dollarplatoon.com/insert/GIG_01HX...?token=abc123&tags=shortform,urgent&
 including the `?task=` opt-in and the skip/report actions, in
 [proofs.md](https://dollarplatoon.com/skill/proofs.md).
 
+**Save as draft** sits beside Submit Proof. It stores the work without delivering it — the client
+is told nothing — and the draft comes back the next time the same link is opened, so a worker in
+an embedded frame can close the tab and carry on later. The draft belongs to the mailbox, not to a
+browser: nothing is kept in local storage, and another device on the same link resumes it.
+
+The button is on the plain form too, but only a `?task=` link RESUMES a draft on load — without a
+task in the URL there is nothing to look one up by. Embed the per-task form if you want the
+save-and-return behaviour:
+
+```
+https://dollarplatoon.com/submit/SHARE_TOKEN?task=TASK_01KXQ...&hide_navbar=true
+```
+
+**Submit Proof sends the draft** when one is saved, rather than minting a second proof — the API
+refuses two live proofs for one task. **Discard** deletes the stored draft and frees the task; the
+text stays in the form, because discarding is about the saved row and not about the screen.
+
 ## Feed reader pages
 
 | Page | URL |

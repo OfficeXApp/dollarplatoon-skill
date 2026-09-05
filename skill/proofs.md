@@ -189,6 +189,40 @@ the task is left alone — abandon it and `task_timeout` recycles it as normal.
 recycling or reassigning it, and the expiry sweep all delete your draft, because otherwise it
 would block the next worker's proof against that task.
 
+### From a share link
+
+Somebody submitting without an account gets the same lifecycle through the mailbox's
+`share_token`. The token is the whole credential, so the draft belongs to the **mailbox**, not to
+a person: it is reachable again from that same link, on any device, after the tab is closed.
+
+```json
+POST   /public/submit-proof        { "share_token": "SHARE_...", "task_identifier": "TASK_...",
+                                     "proofs": ["work in progress"], "draft": true }
+→ { "proof_id": "PROOF_01HX...", "status": "draft", "draft": true, "warning": "..." }
+
+GET    /public/proof-draft?token=SHARE_...&task=TASK_...
+→ { "draft": { "id": "PROOF_01HX...", "proofs": [...], "private_note": "...",
+               "asking_price": null, "saved_at": "2026-09-05T..." } }
+
+PATCH  /public/proof-draft         { "share_token", "proof_id", "proofs": [...] }
+POST   /public/proof-draft/submit  { "share_token", "proof_id" }
+DELETE /public/proof-draft         { "share_token", "proof_id" }
+```
+
+- **The read is by TASK, not by proof id.** A reloaded page knows the task from its own URL and
+  nothing else. `{ "draft": null }` means nothing is saved — it is not an error.
+- Every rule above still holds: the draft claims its task, the client sees nothing, the price is
+  snapshotted at send, and `proofs_submitted` moves only when it is sent.
+- **Your own withheld `private_note` reads back while it is a draft**, so you can carry on editing
+  it. Once the proof is sent the share link cannot read it again — that is what stops a leaked
+  link from harvesting delivered credentials.
+- A second draft for the same task answers `409` with `existing_proof_id` and `status: "draft"`.
+  That is the id to resume, not an error to show.
+- The edit, send and delete routes all answer `409` on a proof that is no longer a draft, and
+  `404` on one held by a different mailbox.
+- **There is no withdraw from a share link.** Once the work is sent, only the account that owns
+  the mailbox can pull it back.
+
 ## The proof lifecycle
 
 ```
@@ -432,8 +466,10 @@ Put a big file in S3 and link it from the note. The link is presigned when the n
 and expires in an hour, so fetch the proof again for a fresh one. The S3 key itself is random,
 which is what keeps the file private while the note is still locked.
 
-A gigworker who submits through a share link (`POST /public/submit-proof`) has no account, so
-they cannot read the note back afterwards. It is write-once from that route.
+A gigworker who submits through a share link (`POST /public/submit-proof`) has no account, so once
+the proof is **sent** they cannot read the note back. While it is still a draft they can:
+`GET /public/proof-draft` returns their own note so they can carry on editing it, and stops
+returning it the moment the proof is submitted.
 
 **On an order machine this field is not optional practice — it is the vendor's only protection.**
 The buyer reads `proofs[]` at review time and may undo the whole order, deposit and all, right up
@@ -482,7 +518,11 @@ https://dollarplatoon.com/submit/SHARE_TOKEN
 |--------|------|------|-------------|
 | GET | `/public/mailbox-info?token=` | No | Gig title, terms, price, mailbox name |
 | GET | `/public/task?token=&task=` | No | One task, if the link opted in with `?task=` |
-| POST | `/public/submit-proof` | No | Submit a proof |
+| POST | `/public/submit-proof` | No | Submit a proof (`draft: true` saves without sending) |
+| GET | `/public/proof-draft?token=&task=` | No | Read back the draft saved for one task |
+| PATCH | `/public/proof-draft` | No | Edit an unsent draft |
+| POST | `/public/proof-draft/submit` | No | Send a draft to the client |
+| DELETE | `/public/proof-draft` | No | Discard a draft |
 | POST | `/public/task/decline` | No | Skip a task |
 | POST | `/public/task/violation` | No | Report a task |
 | POST | `/public/upload-presign` | No | Presigned upload URL (any type, 100MB max) |
@@ -492,6 +532,10 @@ POST /public/submit-proof
 { "share_token": "SHARE_...", "task_identifier": "TASK_...", "proofs": ["https://..."] }
 → { "proof_id": "PROOF_...", "status": "pending" }
 ```
+
+The five draft routes are documented under
+[Drafts — from a share link](#from-a-share-link). Saving is what the **Save as draft** button on
+`/submit/:token` calls; the page reloads that draft the next time the same link is opened.
 
 **Treat the link as a password.** It is per mailbox, not per task, it covers every task in that
 mailbox, and it never expires. Anyone holding it can submit as that worker. Rotate a compromised
